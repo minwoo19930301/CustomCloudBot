@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeHex, hexToRgb, rgbToHex, shuffleColor, createSessionColorPicker} from '../public/session-color-picker.mjs';
+import {normalizeHex, hexToRgb, rgbToHex, shuffleColor, shufflePalette, createSessionColorPicker} from '../public/session-color-picker.mjs';
 
 class Element {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.attributes = new Map(); this.dataset = {};
     this.value = ''; this.validationMessage = ''; this.nativeOpens = 0; this.focuses = 0;
-    this.style = {setProperty() {}};
+    this.style = {values: new Map(), setProperty(name, value) { this.values.set(name, value); }, getPropertyValue(name) { return this.values.get(name); }};
   }
   append(...nodes) { this.children.push(...nodes); }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
@@ -34,6 +34,7 @@ function fixture(options = {}) {
   const fields = all.filter(node => node.tagName === 'input');
   return {
     picker, changes, all,
+    palette: byClass('session-color-palette'),
     presets: all.filter(node => node.className === 'session-color-swatch'),
     rainbow: byClass('session-color-spectrum'), shuffle: byClass('session-color-shuffle'), reset: byClass('session-color-reset'),
     details: byClass('session-color-details'), caption: byClass('session-color-value'),
@@ -87,12 +88,12 @@ test('shuffle can reach arbitrary RGB endpoints and cannot repeat or hang on the
   }
 });
 
-test('exactly five presets precede rainbow and shuffle, and choosing a preset synchronizes the editor', () => {
+test('shuffle precedes five presets and the spectrum, and selecting a preset synchronizes the editor', () => {
   const app = fixture();
   assert.equal(app.presets.length, 5);
   assert.equal(new Set(app.presets.map(button => button.dataset.color)).size, 5);
   const palette = app.picker.element.children[0];
-  assert.deepEqual(palette.children, [...app.presets, app.rainbow, app.shuffle]);
+  assert.deepEqual(palette.children, [app.shuffle, ...app.presets, app.rainbow]);
   for (const preset of app.presets) {
     assert.equal(preset.type, 'button');
     assert.ok(preset.getAttribute('aria-label'));
@@ -103,6 +104,64 @@ test('exactly five presets precede rainbow and shuffle, and choosing a preset sy
     assert.equal(app.rainbow.getAttribute('aria-pressed'), 'false');
   }
   assert.deepEqual(app.changes, app.presets.map(button => button.dataset.color));
+});
+
+function hueFor(hex) {
+  const [r, g, b] = hexToRgb(hex).map(channel => channel / 255);
+  const high = Math.max(r, g, b), low = Math.min(r, g, b), delta = high - low;
+  let hue = high === r ? (g - b) / delta : high === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+  return (hue * 60 + 360) % 360;
+}
+
+test('shuffled palettes cover five separated hues with consistent brightness and saturation', () => {
+  for (let seed = 0; seed < 24; seed++) {
+    const values = [seed / 24, (seed % 7) / 6, (seed % 5) / 4];
+    const colors = shufflePalette([], () => values.shift());
+    assert.equal(colors.length, 5);
+    assert.equal(new Set(colors).size, 5);
+    const hues = colors.map(hueFor).sort((a, b) => a - b);
+    const lightness = [], saturation = [];
+    for (let index = 0; index < 5; index++) {
+      assert.match(colors[index], /^#[0-9a-f]{6}$/);
+      const gap = (hues[(index + 1) % 5] - hues[index] + 360) % 360;
+      assert.ok(gap > 70 && gap < 74, `five distinct hue regions, gap ${gap}`);
+      const channels = hexToRgb(colors[index]).map(channel => channel / 255);
+      const high = Math.max(...channels), low = Math.min(...channels), light = (high + low) / 2;
+      lightness.push(light); saturation.push((high - low) / (1 - Math.abs(2 * light - 1)));
+    }
+    assert.ok(Math.max(...lightness) - Math.min(...lightness) < .01, 'shared brightness');
+    assert.ok(Math.max(...saturation) - Math.min(...saturation) < .01, 'shared saturation');
+  }
+});
+
+test('every shuffle replaces all five swatches even with a repetitive random source', () => {
+  const app = fixture({value: '#12abef', random: () => 0});
+  for (let iteration = 0; iteration < 8; iteration++) {
+    const previous = new Set([...app.presets.map(node => node.dataset.color), app.picker.value]);
+    const changesBefore = app.changes.length;
+    app.shuffle.onclick();
+    const colors = app.presets.map(node => node.dataset.color);
+    assert.equal(colors.length, 5);
+    assert.equal(new Set(colors).size, 5);
+    assert.ok(colors.every(color => !previous.has(color)), 'no old color is merely reordered');
+    assert.equal(app.picker.value, colors[0]);
+    assert.equal(app.changes.length, changesBefore + 1, 'one draft selection per shuffle');
+    assertFields(app, colors[0], hexToRgb(colors[0]));
+    assert.equal(app.rainbow.getAttribute('aria-pressed'), 'false');
+    for (const preset of app.presets) {
+      assert.ok(preset.getAttribute('aria-label').includes(preset.dataset.color.toUpperCase()));
+      assert.equal(preset.style.getPropertyValue('--swatch-color'), preset.dataset.color);
+      preset.onclick();
+      assertFields(app, preset.dataset.color, hexToRgb(preset.dataset.color));
+      assert.equal(preset.getAttribute('aria-pressed'), 'true');
+      assert.equal(app.presets.filter(node => node.getAttribute('aria-pressed') === 'true').length, 1);
+      assert.equal(app.rainbow.getAttribute('aria-pressed'), 'false');
+    }
+    assert.deepEqual(app.palette.children, [app.shuffle, ...app.presets, app.rainbow]);
+  }
+  input(app.hex, '#123456');
+  assertFields(app, '#123456', [18, 52, 86]);
+  assert.equal(app.rainbow.getAttribute('aria-pressed'), 'true');
 });
 
 test('opening the custom editor preserves automatic inheritance and handles native picker fallbacks', () => {

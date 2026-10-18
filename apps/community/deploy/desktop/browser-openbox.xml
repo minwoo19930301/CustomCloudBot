@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <!-- Dedicated browser display. Files and Terminal use the default config on
+       their own X displays, so their window behavior is unaffected. -->
+  <desktops>
+    <number>1</number>
+    <firstdesk>1</firstdesk>
+    <popupTime>0</popupTime>
+  </desktops>
+  <focus>
+    <focusNew>yes</focusNew>
+    <followMouse>no</followMouse>
+  </focus>
+  <theme>
+    <name>Clearlooks</name>
+    <keepBorder>no</keepBorder>
+  </theme>
+  <margins><top>0</top><bottom>0</bottom><left>0</left><right>0</right></margins>
+  <keyboard>
+    <!-- Native Chrome shortcuts remain available; Alt+Tab changes windows. -->
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="A-S-Tab"><action name="PreviousWindow"/></keybind>
+  </keyboard>
+  <mouse>
+    <context name="Client">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+  </mouse>
+  <applications>
+    <!-- Normal and incognito browser windows fill the view. Dialogs, menus,
+         downloads and extension popovers retain their native dimensions. -->
+    <application class="Google-chrome*" type="normal">
+      <decor>no</decor>
+      <maximized>yes</maximized>
+      <desktop>1</desktop>
+    </application>
+  </applications>
+</openbox_config>

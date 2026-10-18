@@ -640,7 +640,7 @@ function openSessionColor(roomId) {
     if(save.disabled||state.session?.user?.id!==userId||sidebarEpoch!==epoch||!picker.reportValidity())return;
     save.disabled=true;
     if(await updateRoomListPreference(room,{color:choice})){if(dialog.isConnected)dialog.close();}else{save.disabled=false;message.textContent="색상을 저장하지 못했습니다. 다시 시도해주세요.";}
-  };actions.append(cancel,save);dialog.append(picker.element,contextElement("p","내 화면에만 적용됩니다. 자동 색상은 가지의 색 계열을 따라갑니다.","session-edit-note"),message,actions);preview();dialog.showModal();
+  };actions.append(cancel,save);dialog.append(picker.element,message,actions);preview();dialog.showModal();
 }
 function openSessionActions(roomId, trigger) {
   const room = state.rooms.find(item => item.id === roomId);

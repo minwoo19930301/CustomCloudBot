@@ -29,12 +29,16 @@ until xdpyinfo -display "$display" >/dev/null 2>&1; do
   sleep 0.1
 done
 
-openbox >/run/desktop/openbox.log 2>&1 &
+# The browser display has no desktop shell or dock. Window-manager rules also
+# maximize later Chrome windows (including incognito), not only the first one.
+openbox --config-file /etc/openclawbot/browser-openbox.xml >/run/desktop/openbox.log 2>&1 &
 openbox_pid=$!
-if command -v tint2 >/dev/null 2>&1; then
-  mkdir -p /home/desktop/Downloads
-  tint2 -c /etc/openclawbot/dock.tint2rc >/run/desktop/dock.log 2>&1 &
-fi
+i=0
+until xprop -display "$display" -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id #'; do
+  i=$((i + 1)); [ "$i" -lt 50 ] || { echo "Browser window manager did not become ready" >&2; exit 1; }
+  sleep 0.1
+done
+mkdir -p /home/desktop/Downloads
 
 # x11vnc is loopback-only. The app-facing websocket bridge is the only VNC
 # transport exposed on the container network; it has no unauthenticated host port.
@@ -50,6 +54,7 @@ ACCESSIBILITY_ENABLED=1 google-chrome \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9223 \
   --force-renderer-accessibility \
+  --start-maximized \
   --no-first-run --no-default-browser-check \
   "$start_url" >/run/desktop/chromium.log 2>&1 &
 browser_pid=$!

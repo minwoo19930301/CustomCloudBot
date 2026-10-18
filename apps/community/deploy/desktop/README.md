@@ -54,6 +54,21 @@ When explicitly configured with COMMUNITY_SHARED_DESKTOP_ROOM=<existing mapped r
 
 Enable COMMUNITY_DESKTOP_VIEWS=1 only after deploying the updated desktop entrypoint. Browser, Files and Terminal use three independent X displays in the same container and `/home/desktop`; switching the file view does not replace the browser screen. Websocket ports 6080–6082 are internal only. No additional public ports, privileged mode, sandbox bypass or VM is needed. Existing containers must be recreated with their current mounts and network configuration preserved; rebuilding the app alone does not enable these views.
 
+The Browser display starts no Linux dock. Its dedicated `browser-openbox.xml`
+maximizes each normal Google Chrome window, including new incognito windows, and
+removes the outer window-manager border. Chrome's own tabs, address bar, profile
+menu and extensions remain available; this is not kiosk mode. Native dialogs and
+the separate Files/Terminal displays keep their own window sizes. Openbox is
+ready before Chrome starts so the initial window receives the same rules.
+
+The standard release command hashes this directory and rebuilds/recreates the
+managed desktop when these files change. This briefly reconnects browser views;
+the existing shared home and Chrome profile are preserved. After rollout, check
+the normal window and a newly opened incognito window fill the browser display,
+then close only the incognito window used for verification. Also check a native
+file chooser and the Files/Terminal views. A healthy VNC handshake alone does not
+verify window geometry. The rules follow [Openbox's per-application settings](https://openbox.org/help/Applications).
+
 ## Native files and terminal transport
 
 `workspace-bridge.py` runs as the existing `desktop` user (UID 10001), beside Chrome and the compatibility VNC views. Internal port **6083** is never published on the host. Only the application's socket peer `172.30.50.2` and container loopback are accepted. Requests with an `Origin` header are rejected so a page in the remote browser cannot open the internal WebSocket; the authenticated application proxy must omit that header. Forwarded-IP headers do not grant access.

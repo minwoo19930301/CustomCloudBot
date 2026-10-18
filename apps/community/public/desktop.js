@@ -56,7 +56,7 @@ export function createDesktopUI({api,getRoomId,getRoomName=()=>'',toast=()=>{},m
 function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,index,onClose}) {
   const state={roomId,view:VIEWS.some(([id])=>id===initialView)?initialView:'browser',generation:0,abort:null,cleanup:null,destroyed:false,keyboardOpen:false,paths:new Map()};
   const panel=el('aside',undefined,'desktop-panel workspace-popup');panel.setAttribute('aria-label','작업 공간');panel.setAttribute('role','dialog');panel.dataset.roomId=roomId;panel.hidden=true;
-  const head=el('div',undefined,'desktop-head'),title=el('strong','작업 공간'),actions=el('div',undefined,'workspace-window-actions'),maximize=actionButton('작업 공간 확대','□'),close=actionButton('작업 공간 닫기','×');close.classList.add('workspace-close');actions.append(maximize,close);head.append(title,actions);head.tabIndex=0;head.title='드래그하여 이동 · 방향키로 위치 이동';head.setAttribute('aria-label','작업 공간 창 이동');
+  const head=el('div',undefined,'desktop-head'),title=el('strong','작업 공간'),actions=el('div',undefined,'workspace-window-actions'),fullscreen=actionButton('작업 공간 전체 화면','⛶'),maximize=actionButton('작업 공간 확대','□'),close=actionButton('작업 공간 닫기','×');close.classList.add('workspace-close');actions.append(fullscreen,maximize,close);head.append(title,actions);head.tabIndex=0;head.title='드래그하여 이동 · 방향키로 위치 이동';head.setAttribute('aria-label','작업 공간 창 이동');
   const resize=actionButton('작업 공간 크기 조절','');resize.className='workspace-resize-handle';resize.title='드래그 또는 방향키로 크기 조절';
   const viewportSize=()=>({width:innerWidth,height:state.keyboardOpen&&globalThis.visualViewport?.scale===1?Math.min(innerHeight,visualViewport.height):innerHeight});
   let geometry=workspaceBounds({},viewportSize(),(index%5)*28),beforeMaximize=null,beforeKeyboard=null;
@@ -70,7 +70,7 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
   const pointerMove=event=>{if(!drag||event.pointerId!==drag.id)return;const dx=event.clientX-drag.x,dy=event.clientY-drag.y;layout(drag.resize?{...drag,width:drag.width+dx,height:drag.height+dy}:{...drag,left:drag.left+dx,top:drag.top+dy});};
   const pointerUp=event=>{if(drag&&event.pointerId===drag.id){try{drag.target.releasePointerCapture?.(event.pointerId);}catch{}drag=null;}};
   for(const target of [head,resize]){target.addEventListener('pointerdown',pointerDown);target.addEventListener('pointermove',pointerMove);target.addEventListener('pointerup',pointerUp);target.addEventListener('pointercancel',pointerUp);target.addEventListener('keydown',event=>{if(event.target!==target||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();restore();const amount=event.shiftKey?40:10,dx=event.key==='ArrowLeft'?-amount:event.key==='ArrowRight'?amount:0,dy=event.key==='ArrowUp'?-amount:event.key==='ArrowDown'?amount:0;layout(target===resize?{...geometry,width:geometry.width+dx,height:geometry.height+dy}:{...geometry,left:geometry.left+dx,top:geometry.top+dy});});}
-  maximize.onclick=setMaximized;head.ondblclick=event=>{if(!event.target.closest('button'))setMaximized();};panel.addEventListener('pointerdown',raise);
+  fullscreen.onclick=()=>void enterDesktopScreen(panel);maximize.onclick=setMaximized;head.ondblclick=event=>{if(!event.target.closest('button'))setMaximized();};panel.addEventListener('pointerdown',raise);
   const tabs=el('div',undefined,'workspace-tabs');tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','작업 공간 보기');
   const buttons=new Map();
   for(const [id,label] of VIEWS){const button=actionButton(label);button.setAttribute('role','tab');button.dataset.view=id;button.onclick=()=>{if(state.view!==id){state.view=id;onViewChange(id);void activate();}};buttons.set(id,button);tabs.append(button);}
@@ -105,9 +105,7 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
     }catch(error){if(current(generation)){empty('작업 공간에 연결하지 못했습니다.');fail(error,generation);}}
   }
   function mountBrowser(base,generation,signal) {
-    const toolbar=el('div',undefined,'workspace-chrome-toolbar'),label=el('span','Chrome','workspace-chrome-label'),newTab=actionButton('Chrome 새 탭','새 탭'),incognito=actionButton('Chrome 시크릿 창','시크릿'),extensions=actionButton('Chrome 확장 프로그램','확장 프로그램'),fullscreen=actionButton('브라우저 전체 화면','전체 화면');
-    toolbar.append(label,newTab,incognito,extensions,fullscreen);
-    const viewport=el('div',undefined,'workspace-chrome-viewport');viewport.setAttribute('aria-label','원격 Chrome 브라우저');content.replaceChildren(toolbar,viewport);
+    const viewport=el('div',undefined,'workspace-chrome-viewport');viewport.setAttribute('aria-label','원격 Chrome 브라우저');content.replaceChildren(viewport);
     let rfb=null,keyboard=null,disposed=false,connected=false,regions=[],regionsAt=0,regionRequest=null,regionTimer=null,regionGeneration=0;
     // Native input bounds are prefetched: iOS must focus within touchend, not an
     // async fetch callback. Invalidating during scroll avoids stale hit targets.
@@ -121,11 +119,6 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
     };
     const invalidateRegions=({clear=true}={})=>{if(clear){regions=[];regionsAt=0;}regionGeneration++;clearTimeout(regionTimer);regionTimer=setTimeout(refreshRegions,80);};
     const active=()=>!disposed&&current(generation)&&!signal.aborted;
-    const controls=()=>{for(const button of[newTab,incognito,extensions])button.disabled=!connected;};controls();
-    const shortcut=(key,shift=false)=>{if(connected&&active()){keyboard?.setEnabled(false);sendChromeShortcut(rfb,key,shift);invalidateRegions();}};
-    newTab.onclick=()=>shortcut('t');incognito.onclick=()=>shortcut('n',true);
-    extensions.onclick=()=>{if(!connected)return;shortcut('t');shortcut('l');for(const char of 'chrome://extensions/')rfb.sendKey(char.charCodeAt(0),null);rfb.sendKey(0xff0d,'Enter');if(!keyboard?.focus({clear:true}))rfb.focus();};
-    fullscreen.onclick=()=>void enterDesktopScreen(panel);
     void(async()=>{
       try{
         const [{default:RFB},ticket]=await Promise.all([import('/vendor/novnc.js'),api(`/api/rooms/${encodeURIComponent(roomId)}/desktop/ticket`,{method:'POST',body:JSON.stringify({view:'browser'}),signal})]);
@@ -136,16 +129,16 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
         rfb=new RFB(viewport,endpoint.href,{shared:true});configureDesktopInput(rfb,false);rfb.qualityLevel=7;rfb.compressionLevel=3;
         const readyStatus=()=>setStatus(keyboard?.enabled?'키보드 입력 중 · 입력칸을 누르면 이어서 입력할 수 있습니다.':matchMedia('(pointer:coarse)').matches?'입력칸을 누르면 키보드가 열립니다.':'Chrome · 탭과 프로필은 브라우저 메뉴에서 관리할 수 있습니다.','ready');
         keyboard=createRemoteKeyboard({rfb,viewport,canInput:()=>connected&&active(),onChange:enabled=>{keyboardLayout(enabled);if(connected&&active())readyStatus();}});
-        rfb.addEventListener('connect',()=>{if(!active())return;connected=true;controls();readyStatus();
+        rfb.addEventListener('connect',()=>{if(!active())return;connected=true;readyStatus();
           const canvas=viewport.querySelector('canvas');
           if(canvas)keyboard.bindCanvas(canvas,{getRegions:()=>Date.now()-regionsAt<1750?regions:[],onInvalidate:invalidateRegions});
           refreshRegions();
         });
-        rfb.addEventListener('disconnect',()=>{connected=false;clearTimeout(regionTimer);regions=[];keyboard?.setEnabled(false);controls();if(active())setStatus('Chrome 연결이 종료됐습니다. 다시 연결해주세요.','error');});
+        rfb.addEventListener('disconnect',()=>{connected=false;clearTimeout(regionTimer);regions=[];keyboard?.setEnabled(false);if(active())setStatus('Chrome 연결이 종료됐습니다. 다시 연결해주세요.','error');});
         rfb.addEventListener('securityfailure',()=>{if(active())setStatus('브라우저에 연결할 권한을 확인해주세요.','error');});
       }catch(error){if(active())fail(error,generation);}
     })();
-    return()=>{disposed=true;connected=false;clearTimeout(regionTimer);regions=[];controls();keyboard?.destroy();keyboard=null;rfb?.disconnect();rfb=null;viewport.replaceChildren();};
+    return()=>{disposed=true;connected=false;clearTimeout(regionTimer);regions=[];keyboard?.destroy();keyboard=null;rfb?.disconnect();rfb=null;viewport.replaceChildren();};
   }
   function mountFiles(base,roomId,generation,signal) {
     const toolbar=el('div',undefined,'workspace-files-toolbar'),up=actionButton('상위 폴더','↑'),root=actionButton('작업 폴더','⌂'),refresh=actionButton('파일 목록 새로고침','↻'),path=el('span','','workspace-file-path');toolbar.append(up,root,refresh,path);

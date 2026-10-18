@@ -43,6 +43,12 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/workspace-tests"
           "$RUNNER_TEMP/workspace-tests/bin/pip" install aiohttp==3.14.4
           "$RUNNER_TEMP/workspace-tests/bin/python" -m unittest discover -s apps/community/deploy/desktop -p 'test_workspace_bridge.py'
+      - name: Test browser-only window layout
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb openbox x11-utils
+          sh -n apps/community/deploy/desktop/entrypoint.sh
+          python3 -m unittest discover -s apps/community/deploy/desktop -p 'test_browser_display.py' -v
 
   deploy:
     needs: verify

@@ -470,12 +470,11 @@ dialog::backdrop,
 .workspace-popup .desktop-head { background: #ffffff73; border-color: var(--line); }
 .workspace-content, .workspace-file-list { background: #faf8ff8f; }
 .workspace-statusbar, .workspace-browser-toolbar, .workspace-files-toolbar,
-.workspace-chrome-toolbar { background: #f0eaf96e; border-color: var(--line); }
 .workspace-tabs, .workspace-file-preview-head { border-color: var(--line); }
 .workspace-button, .workspace-tabs .workspace-button, .desktop-status,
 .desktop-status[data-kind="ready"], .workspace-empty, .workspace-file-path,
 .workspace-file-name, .workspace-file-size, .workspace-file-preview-body,
-.workspace-file-note, .workspace-chrome-label { color: var(--muted); }
+.workspace-file-note { color: var(--muted); }
 .workspace-button:hover:not(:disabled), .workspace-tabs .workspace-button[aria-selected="true"] {
   background: var(--selected); color: var(--glass-accent-strong);
 }

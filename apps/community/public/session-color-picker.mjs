@@ -27,9 +27,32 @@ export function shuffleColor(current, random = Math.random) {
   return rgbToHex(previous.map(channel => channel ^ 128));
 }
 
+function hslToHex(hue, saturation, lightness) {
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const sector = ((hue % 360) + 360) % 360 / 60;
+  const secondary = chroma * (1 - Math.abs(sector % 2 - 1));
+  const channels = [[chroma, secondary, 0], [secondary, chroma, 0], [0, chroma, secondary],
+    [0, secondary, chroma], [secondary, 0, chroma], [chroma, 0, secondary]][Math.floor(sector)];
+  return rgbToHex(channels.map(channel => Math.round((channel + lightness - chroma / 2) * 255)));
+}
+
+/** Even hue spacing keeps five choices distinct; shared saturation and lightness
+ * make them a palette. Rotate on collisions so a repeated random value still
+ * replaces every previous swatch rather than merely reordering the same colors. */
+export function shufflePalette(current = [], random = Math.random) {
+  const previous = new Set(current.slice(0, 6).map(normalizeHex).filter(Boolean));
+  const unit = () => { const value = Number(random()); return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0; };
+  const hue = unit() * 360, saturation = .52 + unit() * .20, lightness = .52 + unit() * .12;
+  for (let attempt = 0; attempt <= previous.size; attempt++) {
+    const colors = Array.from({length: 5}, (_, index) => hslToHex(hue + attempt * 31 + index * 72, saturation, lightness));
+    if (colors.every(color => !previous.has(color))) return colors;
+  }
+  // The five old swatches plus the selected color cannot block every rotation.
+}
+
 /** The draft stays local until the enclosing dialog saves it. Opening the native
  * picker never converts an automatic (null) color into a saved override. */
-export function createSessionColorPicker({value = null, automaticColor = '#9064c2', onChange = () => {}, document: doc = globalThis.document} = {}) {
+export function createSessionColorPicker({value = null, automaticColor = '#9064c2', onChange = () => {}, document: doc = globalThis.document, random = Math.random} = {}) {
   let choice = normalizeHex(value), shown = choice || normalizeHex(automaticColor) || '#9064c2';
   const make = (tag, className, text) => {
     const node = doc.createElement(tag);
@@ -45,13 +68,13 @@ export function createSessionColorPicker({value = null, automaticColor = '#9064c
   palette.setAttribute('role', 'group'); palette.setAttribute('aria-label', '대화 색상 선택');
   const presets = PRESETS.map(([color, label]) => {
     const node = button(label, 'session-color-swatch'); node.dataset.color = color;
-    node.style.setProperty('--swatch-color', color); node.onclick = () => select(color); palette.append(node); return node;
+    node.style.setProperty('--swatch-color', color); node.onclick = () => select(node.dataset.color); return node;
   });
   const spectrum = button('모든 색상 직접 선택', 'session-color-spectrum');
   spectrum.setAttribute('aria-expanded', 'false');
-  const shuffle = button('랜덤 색상', 'session-color-shuffle');
+  const shuffle = button('색상 조합 셔플', 'session-color-shuffle');
   shuffle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h2c5 0 9 12 14 12h2m-4-4 4 4-4 4M3 18h2c2 0 4-2 5-4m4-4c2-3 3-4 5-4h2m-4-4 4 4-4 4"/></svg>';
-  palette.append(spectrum, shuffle);
+  palette.append(shuffle, ...presets, spectrum);
   const summary = make('div', 'session-color-summary'), sample = make('span', 'session-color-sample');
   sample.setAttribute('aria-hidden', 'true');
   const caption = make('output', 'session-color-value'); caption.setAttribute('aria-live', 'polite');
@@ -79,7 +102,7 @@ export function createSessionColorPicker({value = null, automaticColor = '#9064c
     sample.style.backgroundColor = shown;
     caption.textContent = choice ? shown.toUpperCase() : '자동 · ' + shown.toUpperCase();
     presets.forEach(node => node.setAttribute('aria-pressed', String(node.dataset.color === choice)));
-    spectrum.setAttribute('aria-pressed', String(!!choice && !PRESETS.some(([color]) => color === choice)));
+    spectrum.setAttribute('aria-pressed', String(!!choice && !presets.some(node => node.dataset.color === choice)));
     reset.setAttribute('aria-pressed', String(choice === null));
   }
   function select(color) {
@@ -106,7 +129,15 @@ export function createSessionColorPicker({value = null, automaticColor = '#9064c
     });
     if (next) select(next);
   }; });
-  shuffle.onclick = () => select(shuffleColor(shown));
+  shuffle.onclick = () => {
+    const colors = shufflePalette([...presets.map(node => node.dataset.color), shown], random);
+    presets.forEach((node, index) => {
+      const color = colors[index], label = '색상 ' + (index + 1) + ' · ' + color.toUpperCase();
+      node.dataset.color = color; node.style.setProperty('--swatch-color', color);
+      node.title = label; node.setAttribute('aria-label', label);
+    });
+    select(colors[0]);
+  };
   reset.onclick = () => select(null);
   sync();
   return {element, get value() { return choice; }, reportValidity() {

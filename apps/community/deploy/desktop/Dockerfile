@@ -31,6 +31,7 @@ RUN apt-get update \
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/desktop-entrypoint
 COPY --chmod=0755 workspace-bridge.py /usr/local/bin/workspace-bridge
+COPY browser-openbox.xml /etc/openclawbot/browser-openbox.xml
 
 USER desktop
 WORKDIR /home/desktop

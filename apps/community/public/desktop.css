@@ -56,11 +56,8 @@
 .workspace-popup:fullscreen { width:100%!important; height:100%!important; inset:0!important; border:0; border-radius:0; }
 .workspace-resize-handle { position:absolute; right:0; bottom:0; width:22px; height:22px; min-height:0; padding:0; border:0; border-radius:0; background:linear-gradient(135deg,transparent 53%,#8997aa70 54%,#8997aa70 58%,transparent 59%,transparent 69%,#8997aa70 70%,#8997aa70 74%,transparent 75%); cursor:nwse-resize; touch-action:none; z-index:1; }
 .workspace-popup .workspace-statusbar { padding-right:27px; }
-.workspace-chrome-toolbar { display:flex; align-items:center; flex:none; gap:4px; padding:5px 9px; background:#181b22; border-bottom:1px solid #ffffff0a; overflow-x:auto; }
-.workspace-chrome-label { flex:1; padding:0 6px; color:#c6cfdd; font-size:11px; font-weight:600; }
-.workspace-chrome-toolbar .workspace-button { white-space:nowrap; font-size:11px; padding:4px 7px; }
 .workspace-chrome-viewport { position:relative; display:flex; flex:1; width:100%; min-height:0; min-width:0; overflow:hidden; background:#101216; }
 .workspace-chrome-viewport > div { flex:1; min-width:0; min-height:0; }
 .workspace-remote-keyboard { position:absolute; left:1px; bottom:1px; width:1px; height:1px; min-height:0; padding:0; border:0; opacity:.01; resize:none; font-size:16px; pointer-events:none; }
-@media(max-width:500px) { .workspace-popup { border-radius:12px; } .workspace-chrome-label { display:none; } .workspace-chrome-toolbar { gap:1px; padding:4px; } .workspace-chrome-toolbar .workspace-button { font-size:10px; } }
+@media(max-width:500px) { .workspace-popup { border-radius:12px; } }
 @media(pointer:coarse) { .workspace-button { min-height:36px; min-width:34px; } .workspace-browser-toolbar { gap:2px; padding:5px; } .workspace-address { font-size:16px; } }
