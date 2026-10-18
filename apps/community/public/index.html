@@ -334,6 +334,10 @@
                 <div class="composer-tools"></div>
                 <div class="composer-row">
                   <label class="sr-only" for="message-input">메시지 입력</label>
+                  <textarea id="message-input" rows="1" maxlength="4000" placeholder="무엇을 함께 해볼까요?"></textarea>
+                </div>
+                <div id="attachment-list" class="attachment-list" aria-live="polite"></div>
+                <div class="composer-footer" role="group" aria-label="메시지 도구">
                   <button id="attach-button" class="bot-picker-button attach-button" type="button" aria-label="사진 또는 음성 첨부" title="사진 또는 음성 첨부">
                     <svg class="icon"><use href="#i-attach" /></svg>
                   </button>
@@ -342,19 +346,17 @@
                     <svg class="icon"><use href="#i-mic" /></svg>
                   </button>
                   <button id="record-cancel-button" class="record-cancel-button" type="button" hidden>취소</button>
-                  <textarea id="message-input" rows="1" maxlength="4000" placeholder="무엇을 함께 해볼까요?"></textarea>
+                <div class="composer-leading-tools">
+                  <button id="bot-picker-button" class="bot-picker-button bot-selector-trigger" type="button" aria-label="응답할 봇 선택" title="응답할 봇 선택" aria-haspopup="dialog" aria-expanded="false" aria-controls="bot-picker"><span>봇 선택</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button>
+                  <div id="bot-picker" class="bot-picker is-hidden" role="dialog" aria-label="응답할 봇 선택"></div>
+                </div><div class="model-controls">
+                  <label><span class="sr-only">모델</span><select id="model-select" class="model-select" aria-label="모델"><option value="">자동 선택</option></select></label>
+                  <label><span class="sr-only">effort</span><select id="effort-select" class="effort-select" aria-label="effort"><option value="">기본</option><option value="low">낮음</option><option value="medium">보통</option><option value="high">높음</option><option value="xhigh">최대</option></select></label>
+                </div>
                   <button id="send-button" class="send-button" type="submit" aria-label="메시지 보내기">
                     <svg class="icon"><use href="#i-arrow" /></svg>
                   </button>
                 </div>
-                <div id="attachment-list" class="attachment-list" aria-live="polite"></div>
-                <div class="composer-footer"><div class="composer-leading-tools">
-                  <button id="bot-picker-button" class="bot-picker-button bot-selector-trigger" type="button" aria-label="응답할 봇 선택" title="응답할 봇 선택" aria-expanded="false" aria-controls="bot-picker"><svg class="icon"><use href="#i-plus" /></svg></button>
-                  <div id="bot-picker" class="bot-picker is-hidden" role="group" aria-label="응답할 봇 선택"></div>
-                </div><div class="model-controls">
-                  <label><span class="sr-only">모델</span><select id="model-select" class="model-select" aria-label="모델"><option value="">자동 선택</option></select></label>
-                  <label><span class="sr-only">effort</span><select id="effort-select" class="effort-select" aria-label="effort"><option value="">기본</option><option value="low">낮음</option><option value="medium">보통</option><option value="high">높음</option><option value="xhigh">최대</option></select></label>
-                </div></div>
               </form>
               <div class="composer-caption">
                 <span id="bot-picker-label">AI 답변 꺼짐 · 사람끼리 대화</span

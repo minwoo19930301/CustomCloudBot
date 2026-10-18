@@ -248,15 +248,13 @@ dialog::backdrop,
 }
 .composer-footer .model-trigger, .composer-footer .effort-trigger,
 .composer-footer .context-controls .context-trigger,
-.composer-leading-tools .bot-picker-button,
-.composer-row .bot-picker-button:not(.is-recording) { color: var(--session-color, var(--glass-accent-strong)); }
-.composer-leading-tools .bot-picker-button,
-.composer-row .bot-picker-button:not(.is-recording) { background: rgba(var(--pane-tint), .09); }
+.composer-footer .bot-picker-button:not(.is-recording) { color: var(--session-color, var(--glass-accent-strong)); }
+.composer-footer .bot-picker-button:not(.is-recording) { background: rgba(var(--pane-tint), .09); }
+.composer-leading-tools .bot-selector-trigger { background:transparent; }
 .composer-footer .model-trigger:hover, .composer-footer .effort-trigger:hover,
 .composer-footer .model-trigger[aria-expanded="true"], .composer-footer .effort-trigger[aria-expanded="true"],
 .composer-footer .context-controls .context-trigger:hover, .composer-footer .context-controls .context-trigger[aria-expanded="true"],
-.composer-leading-tools .bot-picker-button:hover, .composer-leading-tools .bot-picker-button[aria-expanded="true"],
-.composer-row .bot-picker-button:not(.is-recording):hover {
+.composer-footer .bot-picker-button:not(.is-recording):hover, .composer-footer .bot-picker-button[aria-expanded="true"] {
   color: var(--session-color, var(--glass-accent-strong)); background: rgba(var(--pane-tint), .13);
 }
 .room-view .send-button {

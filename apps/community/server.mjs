@@ -36,6 +36,7 @@ import { BROWSER_TOOL_DEFINITIONS, createBrowserTools } from "./browser-tools.mj
 import { prepareMediaDir, cleanupOrphans, receiveAttachment, finalizeAttachment, createUploadLimiter, MAX_DEFAULT, storedImageDimensions } from "./media.mjs";
 import { createVoiceTranscriber, VOICE_MAX_BYTES } from "./voice.mjs";
 import { createMessageQueue } from "./message-queue.mjs";
+import { createNextPromptCache, NEXT_PROMPT_SYSTEM } from "./next-prompt.mjs";
 import { AVATAR_MAX_BYTES, AVATAR_MIMES, validateAvatarBytes } from "./avatar-media.mjs";
 import { createContinuation, beginTool, finishTool, snapshotContinuation, continuationPrompt } from "./message-continuation.mjs";
 import { createPushService, validateSubscription, validateEndpoint } from "./push.mjs";
@@ -246,6 +247,8 @@ export async function startCommunity(options = {}) {
 
   const jobs = new Set();
   const titleJobs = new Set();
+  const suggestionJobs = new Set();
+  const suggestionCache = createNextPromptCache();
   const controllers = new Set();
   let closing = false;
   let queueDrainTimer, queueDrainPromise, queueDrainRequested=false;
@@ -545,6 +548,14 @@ export async function startCommunity(options = {}) {
     const estimatedTokens=Math.ceil(value.length/2),summaryTokens=Math.ceil(summary.length/2);
     return {text:value,usedChars:value.length,budgetChars:8000,estimatedTokens,
       messageTokens:estimatedTokens-summaryTokens,summaryTokens,compacted:Boolean(saved.summary),merged:Boolean(saved.merged)};
+  }
+  function suggestionSnapshot(roomId) {
+    const saved = savedContext(roomId);
+    const rows = db.prepare("SELECT rowid,id,kind,text FROM messages WHERE room_id=? ORDER BY rowid DESC LIMIT 8").all(roomId);
+    const latest = rows[0];
+    const recent = rows.filter(row => row.rowid > (saved.through || 0));
+    const eligible = roomId !== MONITOR_ROOM && latest?.kind === "bot" && recent.some(row => row.kind === "human" && row.text.trim());
+    return {revision: latest?.id || null, key: roomId + ":" + hash(JSON.stringify([saved, rows])), eligible};
   }
   function insertMessage(
     roomId,
@@ -1085,6 +1096,7 @@ export async function startCommunity(options = {}) {
           "/branch-graph.mjs": ["branch-graph.mjs", "text/javascript"],
           "/session-colors.js": ["session-colors.js", "text/javascript"],
           "/session-color-picker.mjs": ["session-color-picker.mjs", "text/javascript"],
+          "/composer-suggestions.mjs": ["composer-suggestions.mjs", "text/javascript"],
           "/branch-graph.css": ["branch-graph.css", "text/css"],
           "/routines.js": ["routines.js", "text/javascript"],
           "/routines.css": ["routines.css", "text/css"],
@@ -1787,10 +1799,52 @@ export async function startCommunity(options = {}) {
         throw failure(404,"찾을 수 없습니다.");
       }
       const match = url.pathname.match(
-        /^\/api\/rooms\/([a-f0-9-]{36})(?:\/(messages|invites|preferences|fork|merge|shared-copy|compact|progress|context-reset|usage|routines|export|model-control))?$/,
+        /^\/api\/rooms\/([a-f0-9-]{36})(?:\/(messages|invites|preferences|fork|merge|shared-copy|compact|progress|context-reset|usage|routines|export|model-control|suggestion))?$/,
       );
       if (!match) throw failure(404, "찾을 수 없습니다.");
       const room = roomFor(match[1], user);
+      if (match[2] === "suggestion" && method === "POST") {
+        if (typeof body.afterMessageId !== "string" || !roomIdPattern.test(body.afterMessageId)) throw failure(400, "대화 기준을 확인해 주세요.");
+        const model = text(body.model ?? "", 200), effort = text(body.effort ?? "", 16);
+        if ((model && !/^[\w.:/@+-]{1,200}$/.test(model)) || (effort && !EFFORTS.includes(effort))) throw failure(400, "모델 설정을 확인해 주세요.");
+        const snapshot = suggestionSnapshot(room.id);
+        const ready = () => !closing && !roomJobs.has(room.id) && !messageQueue.has(room.id) && suggestionSnapshot(room.id).key === snapshot.key;
+        if (!snapshot.eligible || body.afterMessageId !== snapshot.revision || !ready()) return reply(res, 200, {suggestion: "", revision: snapshot.revision});
+        const pending = suggestionCache.get(snapshot.key, async () => {
+          // A placeholder is speculative, text-only work. It never owns a room
+          // job, grants host access, persists messages, or retries a model call.
+          limit("suggestion:" + user.id, 12);
+          limit("suggestion:global", 60);
+          if (activeBackend() !== "gateway") await pool.ensureModels?.();
+          if (userFor(req)?.sessionHash !== user.sessionHash) return "";
+          roomFor(room.id, user);
+          if (!ready()) return "";
+          const choice = chooseModel(model, effort);
+          if (model && !choice && activeBackend() !== "gateway") return "";
+          const active = choice?.apiKey ? directLlm : llm;
+          if (!active || (active === directLlm && !choice?.apiKey)) return "";
+          const controller = new AbortController();
+          controllers.add(controller);
+          const timer = setTimeout(() => controller.abort(), 15000);
+          try {
+            transaction(() => reserve(user.id, 1));
+            return await active.complete({
+              ...choice, ...(choice?.attempts ? {attempts: choice.attempts.slice(0, 1)} : {}),
+              system: NEXT_PROMPT_SYSTEM, user: contextFor(room.id).text.slice(-6000),
+              isolation: {userId: user.id, roomId: room.id, botId: "suggestion"},
+              toolDefinitions: [], onUsage: recordUsage(room.id),
+              beforeAdditionalModelCall: () => { throw new Error("Suggestion model call budget exhausted"); },
+            }, controller.signal);
+          } finally { clearTimeout(timer); controllers.delete(controller); }
+        });
+        suggestionJobs.add(pending);
+        let suggestion;
+        try { suggestion = await pending; } finally { suggestionJobs.delete(pending); }
+        if (userFor(req)?.sessionHash !== user.sessionHash) throw failure(401, "로그인이 필요합니다.");
+        roomFor(room.id, user);
+        const current = suggestionSnapshot(room.id);
+        return reply(res, 200, {suggestion: ready() ? suggestion : "", revision: current.revision});
+      }
       if(match[2]==="model-control" && method==="POST") {
         if(userFor(req)?.sessionHash!==user.sessionHash)throw failure(401,"로그인이 필요합니다.");
         const run=activeRuns.get(room.id),control=run?.modelControl;
@@ -2114,7 +2168,7 @@ export async function startCommunity(options = {}) {
         await push.close();
         const stopped = new Promise((done) => server.close(done));
         server.closeIdleConnections();
-        await Promise.allSettled([...jobs,...titleJobs]);
+        await Promise.allSettled([...jobs,...titleJobs,...suggestionJobs]);
         await stopped;
         db.close();
       })()),

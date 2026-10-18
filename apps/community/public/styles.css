@@ -1608,7 +1608,7 @@ button:active .agent-art { transform:scale(.94); }
 .session-delete-dialog p { font-size:13px; line-height:1.65; color:var(--muted); }
 .session-delete-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
 .session-delete-actions button { min-height:40px; padding:8px 16px; border:0; border-radius:11px; font:inherit; cursor:pointer; }
-.composer { display:flex; flex-direction:column; gap:3px; }
+.composer { display:flex; flex-direction:column; gap:7px; container-type:inline-size; }
 .composer-tools { display:flex; align-items:center; justify-content:space-between; min-height:28px; padding:0 4px; gap:8px; }
 .composer-tools:empty { display:none; }
 .composer-tools > .context-controls { margin-left:auto; padding:0; }
@@ -1616,24 +1616,28 @@ button:active .agent-art { transform:scale(.94); }
 .composer-tools > .topbar-actions .icon-button { width:30px; height:30px; padding:6px; border:0; background:transparent; border-radius:9px; }
 .composer-tools > .topbar-actions .icon { width:18px; height:18px; }
 .composer-tools .demo-badge { display:none; }
-.composer-row textarea { flex:1 1 auto; width:0; min-width:0; }
-.composer-footer { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 2px 1px; min-width:0; }
-.composer-leading-tools { position:relative; display:flex; align-items:center; flex:0 0 auto; min-width:0; }
-.composer-leading-tools .bot-picker-button { width:30px; height:30px; }
+.composer-row textarea { flex:1 1 auto; width:0; min-width:0; padding:7px 7px 3px; min-height:34px; }
+.composer-footer { display:flex; flex-wrap:nowrap; align-items:center; justify-content:flex-start; gap:6px; padding:0 2px 1px; min-width:0; }
+.composer-leading-tools { position:relative; display:flex; align-items:center; flex:0 1 auto; min-width:0; max-width:150px; }
+.composer-leading-tools .bot-selector-trigger { display:flex; align-items:center; gap:5px; width:auto; height:32px; min-width:0; max-width:100%; padding:6px 8px; border-radius:9px; font:inherit; font-size:12px; }
+.bot-selector-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bot-selector-trigger svg { width:14px; height:14px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; }
 .composer-leading-tools .bot-picker { left:0; bottom:calc(100% + 8px); max-height:min(360px,55dvh); overflow-y:auto; overscroll-behavior:contain; }
 .bot-picker.is-floating { position:fixed; inset:auto; z-index:310; margin:0; box-sizing:border-box; width:min(320px,calc(100vw - 24px)); max-height:min(360px,calc(100dvh - 24px)); overflow-y:auto; overscroll-behavior:contain; }
 .bot-picker.is-floating::backdrop { background:transparent; }
-.composer-footer .model-controls { display:flex; align-items:center; justify-content:flex-end; flex:0 1 auto; flex-wrap:nowrap!important; gap:5px; padding:0; min-width:0; margin:0; }
+.composer-footer .model-controls { display:flex; align-items:center; justify-content:flex-end; flex:1 1 auto; flex-wrap:nowrap!important; gap:5px; padding:0; min-width:0; margin:0; }
 .composer-footer .model-controls label { display:flex; align-items:center; min-width:0; gap:0; }
 .composer-footer .model-controls > label:first-child { flex:0 1 auto; max-width:260px; }
+.composer-footer .model-controls > label:nth-child(2) { flex:0 1 auto; }
 .composer-footer .model-controls > .context-controls { flex:none; order:initial; margin:0; padding:0; }
 #composer-form .composer-footer .model-controls > .context-controls { margin-left:0; }
 .composer-footer .context-trigger { min-height:30px; gap:5px; padding:3px 5px; }
 .composer-footer .context-ring { width:22px; height:22px; }
 .custom-effort-select,.custom-model-select { display:none!important; }
 .composer-footer .model-trigger,.composer-footer .effort-trigger { display:flex; align-items:center; gap:5px; border:0; padding:6px 8px; border-radius:9px; min-height:30px; min-width:0; max-width:100%; font:inherit; font-size:12px; cursor:pointer; }
-.composer-footer .model-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.composer-footer .effort-trigger { flex:none; white-space:nowrap; }
+.composer-footer .model-trigger span,.composer-footer .effort-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.composer-footer .effort-trigger { white-space:nowrap; }
+.composer-footer .send-button { margin-left:2px; }
 .model-trigger svg,.effort-trigger svg { width:14px; height:14px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; }
 .composer-picker { position:fixed; inset:auto; z-index:310; margin:0; box-sizing:border-box; width:min(310px,calc(100vw - 24px)); max-height:min(450px,calc(100dvh - 28px)); overflow:auto; padding:7px; border:1px solid var(--line); border-radius:17px; color:var(--text); box-shadow:0 18px 60px #2222; animation:composer-picker-in .16s ease-out; }
 .composer-picker::backdrop { background:transparent; }
@@ -1688,6 +1692,25 @@ button:active .agent-art { transform:scale(.94); }
   .composer-footer .context-trigger { gap:4px; padding:3px; }
   .main-panel:not(.is-split) > .topbar > .topbar-actions { right:10px; }
   .picker-option { min-height:48px; }
+}
+@container (max-width:430px) {
+  .composer-footer { gap:4px; padding:0; }
+  .composer-footer > .bot-picker-button,.composer-footer > .send-button { width:28px; height:28px; }
+  .composer-leading-tools { max-width:94px; flex-shrink:1.4; }
+  .composer-leading-tools .bot-selector-trigger,.composer-footer .model-trigger,.composer-footer .effort-trigger { font-size:11px; padding:5px 4px; gap:3px; }
+  .composer-footer .model-controls { gap:2px; }
+  .composer-footer .model-controls > label:first-child { max-width:120px; }
+  .composer-footer .effort-trigger span { display:none; }
+  .composer-footer .effort-trigger::before { content:attr(data-short-label); overflow:hidden; text-overflow:ellipsis; }
+  .composer-footer .context-trigger { gap:3px; padding:3px 1px; font-size:10px; }
+  .composer-footer .context-ring { width:18px; height:18px; }
+  .composer-footer .send-button { margin-left:0; }
+}
+@container (max-width:320px) {
+  .composer-footer { gap:3px; }
+  .composer-leading-tools { max-width:72px; }
+  .composer-footer .bot-selector-trigger svg,.composer-footer .model-trigger svg,.composer-footer .effort-trigger svg { width:10px; height:10px; }
+  .composer-footer .context-label { display:none; }
 }
 @media(prefers-reduced-motion:reduce) { .composer-picker { animation:none; } }
 

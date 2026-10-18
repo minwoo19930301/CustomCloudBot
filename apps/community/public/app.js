@@ -1,5 +1,6 @@
 const MONITOR_ROOM = "00000000-0000-4000-8000-000000000001";
 import { createComposerRecorder } from "/composer-recorder.mjs";
+import { createComposerSuggestions } from "/composer-suggestions.mjs";
 import { renderMessageText } from "/message-format.mjs";
 import { renderTranscript, disposeTranscript } from "/transcript.mjs";
 import { recommendedModels, modelLabel, filterModels } from "/model-picker.mjs";
@@ -60,6 +61,7 @@ let routineUI;
 let voiceUI;
 let messageQueueUI;
 let modelFailoverUI;
+let composerSuggestions;
 const topicPrompts = new Set();
 const pendingMessages = new Map();
 const presenceTurns = new Map();
@@ -248,6 +250,7 @@ function showAuth() {
   closeComposerPicker();
   voiceUI?.reset();
   messageQueueUI?.reset();
+  composerSuggestions?.reset();
   messageQueueUI?.render($("#composer-form"), null);
   agentPresence?.reset(); presenceErrors.clear(); presenceTurns.clear(); presenceBusy.clear(); pendingMessages.clear(); notificationUI?.reset();
   profileUI?.close(); sharingUI?.close();
@@ -1374,6 +1377,13 @@ function renderBotPicker(picker = $("#bot-picker")) {
 function updateBotLabel() {
   $("#bot-picker-label").textContent = "";
   $("#bot-picker-label").hidden = true;
+  const names=state.selectedBots.map(id=>state.bots.find(bot=>bot.id===id)?.name).filter(Boolean);
+  const label=names.length?names[0]+(names.length>1?` +${names.length-1}`:""):"봇 선택";
+  for(const trigger of $$(".bot-selector-trigger")) {
+    setPickerTrigger(trigger,label);
+    trigger.title=names.length?`응답할 봇: ${names.join(", ")}`:"응답할 봇 선택";
+    trigger.setAttribute("aria-label",names.length?`응답할 봇 선택: ${names.join(", ")}`:"응답할 봇 선택");
+  }
 }
 
 function clearPendingAttachments(pane = null) {
@@ -1503,6 +1513,14 @@ function toggleBotPicker(trigger,picker) {
   document.body.append(picker);
   if(typeof picker.showPopover==="function") {picker.setAttribute("popover","auto");picker.showPopover();picker.ontoggle=event=>{if(event.newState==="closed"&&activeBotPicker?.picker===picker)closeBotPickers();};}
   position();window.addEventListener("resize",position);window.addEventListener("scroll",position,true);
+  picker.onkeydown=event=>{
+    if(event.key==="Escape"){event.preventDefault();event.stopPropagation();closeBotPickers();trigger.focus();}
+    else if(["ArrowDown","ArrowUp","Home","End"].includes(event.key)) {
+      const inputs=$$("input",picker);if(!inputs.length)return;
+      event.preventDefault();const index=inputs.indexOf(document.activeElement),next=event.key==="Home"?0:event.key==="End"?inputs.length-1:(index+(event.key==="ArrowDown"?1:-1)+inputs.length)%inputs.length;inputs[next].focus();
+    }
+  };
+  ($("input:checked",picker)||$("input",picker))?.focus({preventScroll:true});
 }
 function topicChoiceDialog() {
   return new Promise(resolve=>{
@@ -2016,7 +2034,12 @@ function updateModelAvailability() {
       const blocked=composerBlocked(pane), queued=!!owner.data?.busy;
       if(send){send.disabled=blocked;send.setAttribute("aria-label",queued?"대기열에 추가":"메시지 보내기");send.title=queued?"대기열에 추가 · 현재 답변이 끝나면 순서대로 보냅니다":"메시지 보내기";}
       const input=$("textarea",form);
-      if(input){input.disabled=!!blocked;if(!input.dataset.idlePlaceholder)input.dataset.idlePlaceholder=input.placeholder;input.placeholder=queued?"다음 요청을 입력하세요. Enter를 누르면 대기열에 추가됩니다.":input.dataset.idlePlaceholder;}
+      if(input){
+        input.disabled=!!blocked;
+        composerSuggestions?.sync({input,roomId:owner.roomId,data:owner.data,model:select.value,effort:effort?.value || "",queued,
+          blocked:blocked || pendingMessages.has(owner.roomId) || Boolean(composerRecorder && composerRecorder.status!=="idle"),
+          hasAttachments:Boolean((pane || state).pendingAttachments?.length)});
+      }
       const actions=$$(".context-action",form);
       if(actions[0])actions[0].disabled=owner.busy;
       if(actions[1])actions[1].disabled=owner.busy||!owner.canManage||!(owner.data?.context?.usedChars>=500);
@@ -2095,10 +2118,11 @@ function applyModels(models) {
   decorateEffortPickers();
   updateModelAvailability();
 }
-function setPickerTrigger(button,label) {
+function setPickerTrigger(button,label,shortLabel=label) {
   const text=contextElement("span",label),chevron=document.createElementNS("http://www.w3.org/2000/svg","svg");
   chevron.setAttribute("viewBox","0 0 16 16");chevron.setAttribute("aria-hidden","true");chevron.innerHTML='<path d="m4 6 4 4 4-4"/>';
   button.replaceChildren(text,chevron);
+  button.dataset.shortLabel=shortLabel;
 }
 let composerPicker=null;
 function closeComposerPicker(restoreFocus=false) {
@@ -2160,7 +2184,8 @@ function decorateEffortPickers() {
         openComposerPicker(trigger,"생각의 깊이",[...select.options].map(option=>({label:option.textContent,detail:detail[option.value],selected:option.value===select.value,select:()=>{if(select.disabled||!select.isConnected)return;select.value=option.value;select.dispatchEvent(new Event("change",{bubbles:true}));decorateEffortPickers();}})));
       };
     }
-    setPickerTrigger(select._triggerButton,"생각: "+(select.selectedOptions[0]?.textContent||"기본"));
+    const effortLabel=select.selectedOptions[0]?.textContent||"기본";
+    setPickerTrigger(select._triggerButton,"생각: "+effortLabel,effortLabel);
   }
 }
 
@@ -2298,11 +2323,11 @@ function renderExtraPanes() {
     controls.className = "model-controls";
     controls.append(modelSelect(pane), effortSelect(pane));
     const tools=document.createElement("div");tools.className="composer-tools";
-    const footer=document.createElement("div");footer.className="composer-footer";
+    const footer=document.createElement("div");footer.className="composer-footer";footer.setAttribute("role","group");footer.setAttribute("aria-label","메시지 도구");
     const leading=contextElement("div",undefined,"composer-leading-tools"),botTrigger=contextElement("button",undefined,"bot-picker-button bot-selector-trigger"),botPicker=contextElement("div",undefined,"bot-picker is-hidden");
-    botTrigger.type="button";botTrigger.append(icon("plus"));botTrigger.setAttribute("aria-label","응답할 봇 선택");botTrigger.title="응답할 봇 선택";botTrigger.setAttribute("aria-expanded","false");
-    botPicker.id="pane-bot-picker-"+index;botPicker.setAttribute("role","group");botPicker.setAttribute("aria-label","응답할 봇 선택");botTrigger.setAttribute("aria-controls",botPicker.id);
-    botTrigger.onclick=()=>toggleBotPicker(botTrigger,botPicker);leading.append(botTrigger,botPicker);footer.append(leading,controls);
+    botTrigger.type="button";setPickerTrigger(botTrigger,"봇 선택");botTrigger.setAttribute("aria-label","응답할 봇 선택");botTrigger.title="응답할 봇 선택";botTrigger.setAttribute("aria-haspopup","dialog");botTrigger.setAttribute("aria-expanded","false");
+    botPicker.id="pane-bot-picker-"+index;botPicker.setAttribute("role","dialog");botPicker.setAttribute("aria-label","응답할 봇 선택");botTrigger.setAttribute("aria-controls",botPicker.id);
+    botTrigger.onclick=event=>{event.stopPropagation();toggleBotPicker(botTrigger,botPicker);};leading.append(botTrigger,botPicker);
     const row = document.createElement("div");
     row.className = "composer-row";
     const input = document.createElement("textarea");
@@ -2335,7 +2360,8 @@ function renderExtraPanes() {
     fileInput.onchange = () => { void uploadAttachments(fileInput.files, pane); fileInput.value = ""; };
     const mic=contextElement("button",undefined,"bot-picker-button record-button"),cancel=contextElement("button","취소","record-cancel-button");
     mic.type=cancel.type="button";mic._pane=pane;mic.append(icon("mic"));mic.setAttribute("aria-label","음성 녹음 시작");mic.title="음성 녹음";mic.onclick=()=>toggleRecording(pane);cancel.hidden=true;cancel.onclick=cancelActiveRecording;
-    row.append(attach, fileInput, mic, cancel, input, send);
+    row.append(input);
+    footer.append(attach,fileInput,mic,cancel,leading,controls,send);
     const attachmentList = document.createElement("div");
     attachmentList.className = "attachment-list"; attachmentList.setAttribute("aria-live", "polite");
     form.append(tools, row, attachmentList, footer);
@@ -2352,6 +2378,7 @@ function renderExtraPanes() {
 
   });
   applyModels(state.models);
+  updateBotLabel();
   syncRecordingButtons();
   applyDockLayout();
 }
@@ -2597,7 +2624,7 @@ function bind() {
     event.target.style.height = "auto";
     event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`;
   });
-  $("#bot-picker-button").addEventListener("click", event => toggleBotPicker(event.currentTarget,$("#bot-picker")));
+  $("#bot-picker-button").addEventListener("click", event => {event.stopPropagation();toggleBotPicker(event.currentTarget,$("#bot-picker"));});
   $("#members-toggle").addEventListener("click", () =>
     els.memberPanel.classList.toggle("is-open"),
   );
@@ -2676,6 +2703,7 @@ window.addEventListener("hashchange", () => {
 });
 bind();
 agentPresence = createAgentPresence({ mount: $("#agent-presence") });
+composerSuggestions = createComposerSuggestions({api,getSession:()=>state.session});
 notificationUI = createNotificationCenter({ mount: $("#notification-center"), api,
   getViewingRoomIds: () => !document.hidden && document.hasFocus() && !els.workspace.classList.contains("is-hidden")
     ? [state.selectedRoom, ...state.extra.map(pane => pane.roomId)].filter(Boolean) : [],
