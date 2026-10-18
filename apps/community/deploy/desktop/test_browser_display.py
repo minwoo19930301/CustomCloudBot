@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -20,10 +21,17 @@ class BrowserDisplayTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="browser-display-test-")
         self.addCleanup(self.directory.cleanup)
+        self.logs = {}
+        def log_file(name):
+            path = Path(self.directory.name) / (name + ".log")
+            self.logs[name] = path
+            handle = path.open("w")
+            self.addCleanup(handle.close)
+            return handle
         read_fd, write_fd = os.pipe()
         self.xvfb = subprocess.Popen(
             ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "960x640x24", "-nolisten", "tcp", "-ac"],
-            pass_fds=(write_fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            pass_fds=(write_fd,), stdout=log_file("xvfb"), stderr=subprocess.STDOUT,
         )
         os.close(write_fd)
         self.addCleanup(self.stop, self.xvfb)
@@ -34,12 +42,17 @@ class BrowserDisplayTest(unittest.TestCase):
         finally:
             os.close(read_fd)
         self.env = {**os.environ, "DISPLAY": ":" + display_number, "HOME": self.directory.name}
+        ready = Path(self.directory.name) / "openbox.ready"
         self.wm = subprocess.Popen(
-            ["openbox", "--config-file", str(Path(__file__).with_name("browser-openbox.xml"))],
-            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ["openbox", "--config-file", str(Path(__file__).with_name("browser-openbox.xml")),
+             "--startup", "touch " + shlex.quote(str(ready))],
+            env=self.env, stdout=log_file("openbox"), stderr=subprocess.STDOUT,
         )
         self.addCleanup(self.stop, self.wm)
-        self.wait_for(lambda: "window id #" in self.xprop("-root", "_NET_SUPPORTING_WM_CHECK"))
+        # EWMH ownership precedes theme/font loading and event-handler setup.
+        # Openbox invokes --startup only after its window management is running.
+        self.wait_for(ready.is_file, description="Openbox startup callback", timeout=15)
+        self.assertIn("window id #", self.xprop("-root", "_NET_SUPPORTING_WM_CHECK"))
 
         self.x = ctypes.CDLL(ctypes.util.find_library("X11"))
         pointer, window = ctypes.c_void_p, ctypes.c_ulong
@@ -73,13 +86,21 @@ class BrowserDisplayTest(unittest.TestCase):
             process.kill()
             process.wait(timeout=5)
 
-    def wait_for(self, predicate):
-        deadline = time.monotonic() + 5
+    def diagnostics(self):
+        details = [f"Xvfb status: {self.xvfb.poll()}; Openbox status: {self.wm.poll()}"]
+        for name, path in self.logs.items():
+            details.append(name + ":\n" + path.read_text(errors="replace")[-8000:])
+        return "\n".join(details)
+
+    def wait_for(self, predicate, description="expected X window state", timeout=5):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if self.xvfb.poll() is not None or self.wm.poll() is not None:
+                self.fail("Display process exited while waiting for " + description + "\n" + self.diagnostics())
             if predicate():
                 return
             time.sleep(0.05)
-        self.fail("X window did not reach the expected state")
+        self.fail("Timed out waiting for " + description + "\n" + self.diagnostics())
 
     def xprop(self, *args):
         return subprocess.run(["xprop", *args], env=self.env, capture_output=True, text=True, timeout=2).stdout
@@ -96,7 +117,8 @@ class BrowserDisplayTest(unittest.TestCase):
         self.x.XChangeProperty(self.display, window, property_atom, 4, 32, 0, value, 1)
         self.x.XMapWindow(self.display, window)
         self.x.XSync(self.display, 0)
-        self.wait_for(lambda: "_OB_APP_TYPE(UTF8_STRING)" in self.xprop("-id", hex(window), "_OB_APP_TYPE"))
+        self.wait_for(lambda: "_OB_APP_TYPE(UTF8_STRING)" in self.xprop("-id", hex(window), "_OB_APP_TYPE"),
+                      description=f"Openbox managing {window_class} {kind} window {hex(window)}")
         return window
 
     def geometry(self, window):

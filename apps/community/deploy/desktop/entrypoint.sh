@@ -31,11 +31,20 @@ done
 
 # The browser display has no desktop shell or dock. Window-manager rules also
 # maximize later Chrome windows (including incognito), not only the first one.
-openbox --config-file /etc/openclawbot/browser-openbox.xml >/run/desktop/openbox.log 2>&1 &
+rm -f /run/desktop/openbox.ready
+openbox --config-file /etc/openclawbot/browser-openbox.xml \
+  --startup 'touch /run/desktop/openbox.ready' >/run/desktop/openbox.log 2>&1 &
 openbox_pid=$!
 i=0
-until xprop -display "$display" -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id #'; do
-  i=$((i + 1)); [ "$i" -lt 50 ] || { echo "Browser window manager did not become ready" >&2; exit 1; }
+# EWMH ownership is published before Openbox loads themes and registers its
+# event handlers. Its startup callback runs only after window management is ready.
+until [ -f /run/desktop/openbox.ready ]; do
+  i=$((i + 1))
+  if ! kill -0 "$openbox_pid" 2>/dev/null || [ "$i" -ge 150 ]; then
+    echo "Browser window manager did not become ready" >&2
+    tail -n 30 /run/desktop/openbox.log >&2
+    exit 1
+  fi
   sleep 0.1
 done
 mkdir -p /home/desktop/Downloads
