@@ -90,7 +90,7 @@ function setupSubmit({ paneMode, busy = true, uploading = false, error = false, 
   const input = { value: "", style: {}, focus() {} }, pane = { roomId: "room-a", model: "m", effort: "high", data: { busy }, attachmentGeneration: 1, pendingAttachments: [{ uploading, error: error ? "failed" : undefined, attachment: uploading || error ? null : { id: "image-1" } }] };
   const state = { selectedRoom: "room-a", session: { user: { id: "u" } }, pendingAttachments: pane.pendingAttachments, attachmentGeneration: 1, selectedBots: ["bot"], roomData: pane.data, extra: [pane] };
   const calls = [], notices = [], bubbles = [];
-  const context = { state, composerRecorder: { status: "idle", context: null }, crypto: { randomUUID: () => "n" }, presenceErrors: new Set(), topicPrompts: new Set(), pendingMessages: new Map(), els: {},
+  const context = { agentPresence: { react() {} }, state, composerRecorder: { status: "idle", context: null }, crypto: { randomUUID: () => "n" }, presenceErrors: new Set(), topicPrompts: new Set(), pendingMessages: new Map(), els: {},
     $: selector => selector === "textarea" || selector === "#message-input" ? input : { value: "m" },
     composerBlocked: () => false, offerTopicChoice: () => false, contextOwnerCurrent: () => true,
     api: async (path, options) => { calls.push({ path, body: JSON.parse(options.body) }); if (fail) throw new Error("retry"); return { queued: busy }; },

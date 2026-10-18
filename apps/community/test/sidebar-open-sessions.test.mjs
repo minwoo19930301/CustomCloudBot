@@ -83,17 +83,14 @@ function fixture({open = ['a', 'b'], focus = 0} = {}) {
   return {
     state, runtime, rows: () => find('.branch-row', roomList),
     row: id => find('.branch-row', roomList).find(node => node.dataset.roomId === id),
-    node: id => find('[data-activity-room]', roomList).find(node => node.dataset.activityRoom === id),
+    dots: () => descendants(roomList).filter(node => node.tagName === 'circle'),
   };
 }
 function assertSelection(app, open, focused) {
   assert.deepEqual(app.rows().filter(row => row.classList.contains('is-open')).map(row => row.dataset.roomId).sort(), [...open].sort());
   assert.deepEqual(app.rows().filter(row => row.classList.contains('is-selected')).map(row => row.dataset.roomId), focused ? [focused] : []);
   assert.deepEqual(app.rows().filter(row => row.getAttribute('aria-current') === 'page').map(row => row.dataset.roomId), focused ? [focused] : []);
-  for (const row of app.rows()) {
-    assert.equal(app.node(row.dataset.roomId).classList.contains('is-open'), open.includes(row.dataset.roomId));
-    assert.equal(app.node(row.dataset.roomId).classList.contains('is-selected'), row.dataset.roomId === focused);
-  }
+  assert.equal(app.dots().length, 0, 'session highlights need no decorative dots');
 }
 
 test('all eight visible sessions remain highlighted as focus moves, without marking closed sessions', () => {
@@ -141,7 +138,6 @@ test('open highlights coexist with working glow, drag handles, and search ancest
   app.state.forks = [{id: 'b', parent: 'a'}]; app.runtime.sessionSearch = 'Room b'; app.runtime.renderRooms();
   assertSelection(app, ['a', 'b'], 'b');
   assert.ok(app.row('a').classList.contains('is-working'));
-  assert.ok(app.node('a').classList.contains('is-working'));
   assert.ok(app.row('a').classList.contains('is-ancestor'));
   assert.equal(app.row('a').getAttribute('aria-description'), '작업 진행 중');
   assert.equal(app.row('a').dataset.dockRoom, 'a');

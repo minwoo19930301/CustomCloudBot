@@ -14,16 +14,14 @@
 .branch-graph .branch-path { stroke:var(--branch-color); stroke-width:1.25; stroke-linecap:round; stroke-linejoin:round; fill:none; opacity:.30; transition:opacity 180ms ease; }
 .branch-graph .branch-path.is-merge { stroke-dasharray:none; opacity:.40; }
 .branch-graph .branch-path.is-current { opacity:.72; stroke-width:1.5; }
-.branch-node { stroke:var(--branch-color); stroke-width:1.5; fill:var(--sidebar); }
-.branch-graph .branch-node.is-working { fill:var(--branch-color); filter:drop-shadow(0 0 4px var(--branch-color)); }
-.branch-node.is-selected { fill:var(--branch-color); stroke-width:2; }
-.branch-row { position:relative; z-index:1; display:flex; align-items:center; width:100%; height:56px; margin:0; padding:7px 10px 7px var(--branch-rail); color:var(--text); background:transparent; border:0; border-radius:8px; text-align:left; cursor:pointer; transition:background 150ms ease; }
+.branch-row { position:relative; z-index:1; display:flex; align-items:center; width:100%; height:44px; margin:0; padding:5px 10px 5px var(--branch-rail); color:var(--text); background:transparent; border:0; border-radius:8px; text-align:left; cursor:pointer; transition:background 150ms ease; }
 .branch-row:hover { background:#ffffff06; }
 .branch-row.is-selected { background:#b7a0ed0e; }
 .branch-row:focus-visible { outline:1px solid #b7a0ed; outline-offset:-1px; }
-.branch-row-copy { display:grid; gap:4px; min-width:0; width:100%; }
+.branch-row-copy { display:grid; gap:2px; min-width:0; width:100%; }
 .branch-row-copy strong { font-size:12px; line-height:1.4; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .branch-row-copy small { font-size:9px; line-height:1.4; color:#817a89; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.branch-row-copy small:empty { display:none; }
 .branch-row.is-selected .branch-row-copy strong { color:#e4d5ff; }
 .branch-row.is-ancestor .branch-row-copy { opacity:.48; }
 .branch-list-footer { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; padding:12px 4px 0; border-top:1px solid #ffffff07; margin-top:12px; }

@@ -33,7 +33,7 @@ function fixture({ paneMode = false, text = '사진을 확인해 줘', busy = fa
   const pendingMessages = new Map(), calls = [], paints = [], notices = [], refreshes = [], clearCalls = [];
   const responses = [];
   let nonce = 0, availabilityChanges = 0, refreshFailure = null;
-  const context = {
+  const context = { agentPresence: { react() {} },
     state, composerRecorder: { status: 'idle', context: null }, pendingMessages, MONITOR_ROOM: 'monitor', modelChanges: new Map(), branchOperations: new Set(),
     topicPrompts: new Set(), presenceErrors: new Set(), Map, Set, JSON, Object,
     crypto: { randomUUID: () => `nonce-${++nonce}` },

@@ -70,7 +70,7 @@ export function layoutBranches(rooms, links, {query = '', order = []} = {}) {
 }
 
 /** Keep curved branch joins away from other row nodes, including after a drag. */
-export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {rowHeight = 56, maxWidth = 72} = {}) {
+export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {rowHeight = 44, maxWidth = 72} = {}) {
   const step = 12, origin = 10;
   const nodes = rows.map(row => ({id: row.id, x: origin + row.lane * step, y: row.index * rowHeight + rowHeight / 2}));
   const byId = new Map(nodes.map(node => [node.id, node]));

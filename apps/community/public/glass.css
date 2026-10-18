@@ -91,20 +91,17 @@ input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
 .branch-color-1 { --branch-color: #bc719b; }
 .branch-color-2 { --branch-color: #558f95; }
 .branch-path { opacity: .55; }
-.branch-node { fill: #f5f0fd; }
 .branch-row:hover { background: rgba(255, 255, 255, .30); }
 
 .branch-row.is-open {
   background: linear-gradient(120deg, rgba(255, 255, 255, .28), rgba(255, 255, 255, .06)), rgba(var(--pane-tint), .14);
-  box-shadow: inset 0 0 0 1px rgba(var(--pane-tint), .26), inset 0 1px 0 rgba(255, 255, 255, .65);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45);
 }
 .branch-row.is-open:hover { background: rgba(var(--pane-tint), .20); }
 .branch-row.is-selected {
   background: linear-gradient(120deg, rgba(255, 255, 255, .34), rgba(255, 255, 255, .06)), rgba(var(--pane-tint), .23);
-  box-shadow: inset 3px 0 0 var(--session-color), inset 0 0 0 1px rgba(var(--pane-tint), .38), inset 0 1px 0 rgba(255, 255, 255, .72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .62);
 }
-.branch-node.is-open { fill: var(--branch-color); stroke-width: 2; }
-.branch-node.is-open:not(.is-selected):not(.is-working) { fill-opacity: .45; }
 .branch-row .branch-row-copy strong { color: var(--session-color, var(--text)); }
 .branch-row.is-selected .branch-row-copy strong { color: var(--session-color, #694792); font-weight: 600; }
 .branch-row.is-ancestor .branch-row-copy { opacity: .72; }

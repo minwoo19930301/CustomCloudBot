@@ -1,4 +1,16 @@
 /* One visible character, with motion driven by actual task state. */
 .agent-presence { width:48px; height:48px; justify-self:center; align-self:center; background:transparent; isolation:isolate; }
-.agent-presence-image { display:block; width:100%; height:100%; object-fit:contain; pointer-events:none; }
+.agent-presence-image { display:block; width:100%; height:100%; object-fit:contain; pointer-events:none; transform-origin:50% 85%; }
+.agent-presence[data-state="idle"] .agent-presence-image { animation:agent-breathe 4.8s ease-in-out infinite; }
+.agent-presence[data-state="working"] .agent-presence-image { animation:agent-work 1s ease-in-out infinite; }
+.agent-presence[data-reaction="typing"] .agent-presence-image { animation:agent-listen .7s ease-in-out infinite; }
+.agent-presence[data-reaction="send"] .agent-presence-image { animation:agent-send .65s ease-out both; }
+.agent-presence[data-reaction="complete"] .agent-presence-image { animation:agent-complete .65s ease-in-out 2; }
+.agent-presence.is-paused .agent-presence-image { animation:none; }
+@keyframes agent-breathe { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-2px); } }
+@keyframes agent-work { 0%,100% { transform:translateY(0) rotate(-1.5deg); } 50% { transform:translateY(-2px) rotate(1.5deg); } }
+@keyframes agent-listen { 0%,100% { transform:rotate(-3deg); } 50% { transform:translateY(-2px) rotate(3deg); } }
+@keyframes agent-send { 0%,100% { transform:translateY(0); } 35% { transform:translateY(-5px) rotate(-3deg); } 65% { transform:translateY(1px) rotate(2deg); } }
+@keyframes agent-complete { 0%,100% { transform:rotate(0); } 35% { transform:translateY(-2px) rotate(-4deg); } 70% { transform:rotate(3deg); } }
+@media(prefers-reduced-motion:reduce) { .agent-presence[data-state] .agent-presence-image { animation:none; } }
 @media(max-width:720px) { .agent-presence { width:44px; height:44px; } }

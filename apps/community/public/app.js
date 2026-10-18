@@ -64,6 +64,7 @@ const topicPrompts = new Set();
 const pendingMessages = new Map();
 const presenceTurns = new Map();
 const presenceErrors = new Set();
+const presenceBusy = new Set();
 const branchOperations = new Set();
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -248,7 +249,7 @@ function showAuth() {
   voiceUI?.reset();
   messageQueueUI?.reset();
   messageQueueUI?.render($("#composer-form"), null);
-  agentPresence?.reset(); presenceErrors.clear(); presenceTurns.clear(); pendingMessages.clear(); notificationUI?.reset();
+  agentPresence?.reset(); presenceErrors.clear(); presenceTurns.clear(); presenceBusy.clear(); pendingMessages.clear(); notificationUI?.reset();
   profileUI?.close(); sharingUI?.close();
   setupUI?.reset();
   mailUI?.reset();
@@ -711,16 +712,14 @@ function renderRooms() {
     const graph = layoutBranches(state.rooms.filter(room => room.id !== MONITOR_ROOM), state.forks, {order:sidebarState.roomOrder,query:sessionSearch});
     const graphList = document.createElement("div"); graphList.className = "branch-graph";
     const geometry = branchGraphGeometry(graph);
-    graphList.style.setProperty("--branch-rail", geometry.width + "px");
+    graphList.style.setProperty("--branch-rail", (geometry.paths.length ? geometry.width : 12) + "px");
     const svg = branchSvg("svg", {class:"branch-lines", width:geometry.width, height:geometry.height, "aria-hidden":"true"});
     const byId = new Map(graph.rows.map(row => [row.id,row]));
     for (const edge of geometry.paths) {
       svg.append(branchSvg("path", {d:edge.d, style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`, class:`branch-path${edge.secondary ? " is-merge" : ""}${edge.from===currentBranchId()||edge.to===currentBranchId()?" is-current":""}`}));
     }
-    const positions = new Map(geometry.nodes.map(node => [node.id,node]));
     for (const row of graph.rows) {
-      const open = openIds.has(row.id), active = open && focusedId === row.id, position = positions.get(row.id);
-      svg.append(branchSvg("circle", {cx:position.x, cy:position.y, r:open?4:3, style:`--branch-color:${colors.get(row.id)?.color || "currentColor"}`, class:`branch-node${open?" is-open":""}${active?" is-selected":""}`,"data-activity-room":row.id}));
+      const open = openIds.has(row.id), active = open && focusedId === row.id;
       const button = document.createElement("button"); button.type="button"; button.className="branch-row"; button.dataset.roomId=row.id; button.dataset.dockRoom=row.id;
       button.classList.toggle("is-open",open); button.classList.toggle("is-selected",active); button.classList.toggle("is-ancestor",!row.matched); if(active)button.setAttribute("aria-current","page");
       const copy=document.createElement("span"); copy.className="branch-row-copy";
@@ -914,13 +913,11 @@ async function refreshRoom(force = false) {
   }
 }
 function syncSessionActivity() {
-  const nodes=new Map($$("[data-activity-room]",els.roomList).map(node=>[node.dataset.activityRoom,node]));
   for(const row of $$(".branch-row",els.roomList)) {
     const id=row.dataset.roomId, room=state.rooms.find(room=>room.id===id);
     const pane=state.extra.find(pane=>pane.roomId===id);
     const busy=(state.selectedRoom===id?state.sending||state.roomData?.busy:pane?.sending||pane?.data?.busy)||room?.busy;
     row.classList.toggle("is-working",!!busy);
-    nodes.get(id)?.classList.toggle("is-working",!!busy);
     if(busy)row.setAttribute("aria-description","작업 진행 중");else row.removeAttribute("aria-description");
   }
 }
@@ -957,6 +954,9 @@ function observeRoomOutcome(data) {
   if(presenceTurns.has(roomId) && presenceTurns.get(roomId)!==outcome.humanId)presenceErrors.delete(roomId);
   presenceTurns.set(roomId,outcome.humanId);
   if(outcome.failed)presenceErrors.add(roomId);
+  if(data.busy)presenceBusy.add(roomId);
+  else if(presenceBusy.delete(roomId) && !outcome.failed &&
+    data.messages?.findLast(message=>message.kind==="human" || message.kind==="bot")?.kind==="bot")agentPresence?.react("complete");
   const pending=pendingMessages.get(roomId);
   if(pending && (data.messages || []).some(message=>message.id===pending.id || (pending.clientNonceHash && message.clientNonceHash===pending.clientNonceHash)))pendingMessages.delete(roomId);
 }
@@ -1148,7 +1148,7 @@ function renderProgressRoom(roomId) {
 function updateAgentPresence() {
   const rooms = [{ roomId: state.selectedRoom, data: state.roomData }, ...state.extra.map(pane => ({ roomId: pane.roomId, data: pane.data?.room?.id === pane.roomId ? pane.data : null }))].filter(room => room.roomId && room.roomId !== MONITOR_ROOM);
   agentPresence?.set(resolveAgentPresence({
-    sending: state.sending || state.extra.some(pane => pane.sending),
+    sending: state.sending || state.extra.some(pane => pane.sending) || rooms.some(room=>pendingMessages.get(room.roomId)?.retrying),
     rooms: rooms.map(room => ({ busy: !!room.data?.busy, stage: (progressStreams.get(room.roomId)?.events || room.data?.progress || []).at(-1)?.stage })),
     hasError: rooms.some(room => presenceErrors.has(room.roomId)),
   }), Boolean(state.session?.user));
@@ -1304,7 +1304,7 @@ async function retryPendingMessage(message) {
   const current = () => sameSession() && pendingMessages.get(roomId) === message;
   message.retrying = true; message.pending = "sending";
   presenceErrors.delete(roomId);
-  paintPending(roomId); updateModelAvailability();
+  paintPending(roomId); updateModelAvailability(); agentPresence?.react("send");
   let accepted = false;
   try {
     const result = await api(`/api/rooms/${encodeURIComponent(roomId)}/messages`, { method: "POST", body: payload, retryable: true });
@@ -1590,6 +1590,7 @@ async function submitMessage(event, skipTopic = false) {
   presenceErrors.delete(roomId);
   state.sending = true;
   updateModelAvailability();
+  agentPresence?.react("send");
   $("#send-button").disabled = true;
   input.disabled = true;
   input.value=""; input.style.height="";
@@ -2307,7 +2308,7 @@ function renderExtraPanes() {
     const input = document.createElement("textarea");
     input.rows = 1;
     input.value=pane.draft || "";
-    input.addEventListener("input",()=>{pane.draft=input.value;});
+    input.addEventListener("input",()=>{pane.draft=input.value;agentPresence?.react("typing");});
     input.addEventListener("paste", event => pasteAttachments(event, pane));
     input.maxLength = 4000;
     input.placeholder = "무엇을 함께 해볼까요?";
@@ -2412,6 +2413,7 @@ async function submitPane(event, index, skipTopic = false) {
   presenceErrors.delete(roomId);
   pane.sending = true;
   updateModelAvailability();
+  agentPresence?.react("send");
   input.value=""; pane.draft="";input.disabled=true;
   const pending=pane.data?.busy ? null : await optimisticMessage(roomId,text,nonce,attachments.map(item => item.attachment));
   if (pending) pending.retry = Object.freeze({ roomId, userId, payload });
@@ -2591,6 +2593,7 @@ function bind() {
     }
   });
   $("#message-input").addEventListener("input", (event) => {
+    agentPresence?.react("typing");
     event.target.style.height = "auto";
     event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`;
   });

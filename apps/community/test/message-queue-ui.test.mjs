@@ -79,7 +79,7 @@ function setupSubmit({paneMode=false,busy=true,response}={}) {
   const state={session:{user:{id:'owner'}},selectedRoom:'room-1',roomData:pane.data,pendingAttachments:[],selectedBots:['assistant'],extra:[pane],sending:false};
   const pendingMessages=new Map(),calls=[],optimistic=[],paints=[],toasts=[];let nonce=0;
   const elements={'#message-input':input,'#model-select':{value:'selected-model'},'#effort-select':{value:'high'},'#send-button':{disabled:false}};
-  const context={state,composerRecorder:{status:"idle",context:null},MONITOR_ROOM:'monitor',Map,Set,JSON,crypto:{randomUUID:()=>`nonce-${++nonce}`},modelChanges:new Map(),branchOperations:new Set(),topicPrompts:new Set(),presenceErrors:new Set(),pendingMessages,
+  const context={agentPresence:{react(){}},state,composerRecorder:{status:"idle",context:null},MONITOR_ROOM:'monitor',Map,Set,JSON,crypto:{randomUUID:()=>`nonce-${++nonce}`},modelChanges:new Map(),branchOperations:new Set(),topicPrompts:new Set(),presenceErrors:new Set(),pendingMessages,
     $:selector=>selector==='textarea'?input:selector==='.model-select'?elements['#model-select']:selector==='.effort-select'?elements['#effort-select']:elements[selector],
     roomContextOwner:current=>({roomId:current?current.roomId:state.selectedRoom,data:current?current.data:state.roomData,busy:current?current.data.busy:state.roomData.busy}),
     contextOwnerCurrent:(roomId,userId,current)=>state.session?.user?.id===userId&&(current?current.roomId===roomId:state.selectedRoom===roomId),
