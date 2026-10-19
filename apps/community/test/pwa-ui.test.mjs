@@ -18,15 +18,15 @@ function setup({ supported = false, api, requestPermission, url = 'https://bots.
   let subscribed = 0;
   const registration = { pushManager: { getSubscription: async () => null, subscribe: async () => { subscribed++; return { toJSON: () => ({}), unsubscribe: async () => {}, endpoint: 'https://push.example/sub' }; } } };
   const navigator = { userAgent: 'Chrome/140', platform: 'Linux', maxTouchPoints: 0 };
-  const navigations = [], location = new URL(url);
+  const navigations = [], opened = [], location = new URL(url);
   location.assign = value => navigations.push(value);
-  const window = { location, handlers: {}, isSecureContext: true, matchMedia: () => ({ matches: standalone }), addEventListener(k, fn) { this.handlers[k] = fn; }, removeEventListener(k) { delete this.handlers[k]; } };
+  const window = { location, open(...args) { opened.push(args); return null; }, handlers: {}, isSecureContext: true, matchMedia: () => ({ matches: standalone }), addEventListener(k, fn) { this.handlers[k] = fn; }, removeEventListener(k) { delete this.handlers[k]; } };
   const Notification = { permission: 'default', requestPermission: requestPermission || (async () => { throw Error('unsolicited permission'); }) };
   if (supported) { navigator.serviceWorker = { register: async () => registration, ready: Promise.resolve(registration) }; window.PushManager = {}; window.Notification = Notification; }
   const context = { URL, navigator, window, Notification, document: { querySelector: (selector) => nodes.get(selector.slice(1)) }, Uint8Array, atob: (v) => Buffer.from(v, 'base64').toString('binary') };
   vm.runInNewContext(source + '\nthis.createPwaController = createPwaController;', context);
   const controller = context.createPwaController({ api: async (...args) => { calls.push(args); return api ? api(...args) : { configured: true, publicKey: 'AQID' }; }, getSession: () => session, toast() {} });
-  return { nodes, window, calls, controller, navigations, get subscribed() { return subscribed; }, setSession(id) { session = id ? { user: { id } } : null; controller.setSession(session); } };
+  return { nodes, window, calls, controller, navigations, opened, get subscribed() { return subscribed; }, setSession(id) { session = id ? { user: { id } } : null; controller.setSession(session); } };
 }
 
 test('install action stays visible without beforeinstallprompt and gives honest browser instructions', async () => {
@@ -103,21 +103,32 @@ test('configured app origin changes only the install destination until explicitl
     await app.nodes.get(id).handlers.click();
   }
   assert.deepEqual(app.navigations, ['https://192.0.2.10/?install=1', 'https://192.0.2.10/?install=1']);
+  assert.deepEqual(app.opened, [], 'regular browser installation keeps same-window navigation');
   assert.equal(prompts, 0, 'a deferred domain install prompt must not be used for the IP app');
   assert.equal(app.calls.length, 0);
 });
 
-test('domain-installed apps remain in their current scope and can explicitly open the IP install page', async () => {
+test('alternate-origin installation preserves standalone scope but navigates a regular browser after appinstalled', async () => {
   for (const standalone of [false, true]) {
-    const app = setup({ standalone });
+    const url = 'https://bots.example.test/?room=private-room#invite=private-token';
+    const app = setup({ standalone, url });
     if (!standalone) app.window.handlers.appinstalled();
     assert.equal(app.nodes.get('install-button').disabled, true);
     app.controller.setAppOrigin('https://192.0.2.10');
     assert.deepEqual(app.navigations, [], 'setting configuration must never redirect an installed app');
+    assert.deepEqual(app.opened, [], 'setting configuration must not open another window');
     assert.equal(app.nodes.get('install-button').disabled, false);
     assert.equal(app.nodes.get('install-button').textContent, '앱으로 만들기');
-    await app.nodes.get('install-button').handlers.click();
-    assert.deepEqual(app.navigations, ['https://192.0.2.10/?install=1']);
+    for (const id of ['install-button', 'auth-install-button']) await app.nodes.get(id).handlers.click();
+    if (standalone) {
+      assert.deepEqual(app.navigations, [], 'a null window.open result must never fall back to leaving app scope');
+      assert.equal(app.window.location.href, url);
+      assert.deepEqual(app.opened, Array.from({length: 2}, () => ['https://192.0.2.10/?install=1', '_blank', 'noopener,noreferrer']));
+    } else {
+      assert.deepEqual(app.navigations, ['https://192.0.2.10/?install=1', 'https://192.0.2.10/?install=1']);
+      assert.deepEqual(app.opened, []);
+    }
+    assert.equal(app.calls.length, 0);
   }
 });
 
@@ -131,6 +142,7 @@ test('same-origin installed apps keep install disabled without navigation or OS 
       await app.nodes.get(id).handlers.click();
     }
     assert.deepEqual(app.navigations, []);
+    assert.deepEqual(app.opened, []);
     assert.equal(app.nodes.get('pwa-dialog').open, undefined);
     assert.equal(app.calls.length, 0);
   }
@@ -156,5 +168,21 @@ test('the explicit IP installation page shows browser help once without triggeri
   app.controller.setAppOrigin('https://192.0.2.10');
   assert.equal(app.nodes.get('pwa-dialog').open, false);
   assert.deepEqual(app.navigations, []);
+  assert.equal(app.calls.length, 0);
+});
+
+test('an installed app reopened at its install URL does not offer reinstallation', async () => {
+  const app = setup({ url: 'https://192.0.2.10/?install=1', standalone: true });
+  let prompts = 0;
+  app.window.handlers.beforeinstallprompt({ preventDefault() {}, prompt: async () => { prompts++; }, userChoice: Promise.resolve({ outcome: 'accepted' }) });
+  for (let i = 0; i < 2; i++) app.controller.setAppOrigin('https://192.0.2.10');
+  for (const id of ['install-button', 'auth-install-button']) {
+    assert.equal(app.nodes.get(id).disabled, true);
+    await app.nodes.get(id).handlers.click();
+  }
+  assert.equal(app.nodes.get('pwa-dialog').open, undefined);
+  assert.equal(prompts, 0);
+  assert.deepEqual(app.navigations, []);
+  assert.deepEqual(app.opened, []);
   assert.equal(app.calls.length, 0);
 });

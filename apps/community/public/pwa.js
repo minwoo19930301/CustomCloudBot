@@ -153,7 +153,11 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
   const install = async () => {
     if (state.installBusy) return;
     if (state.appOrigin && state.appOrigin!==window.location?.origin) {
-      window.location.assign(state.appOrigin+"/?install=1"); return;
+      const destination = state.appOrigin+"/?install=1";
+      // Keep the installed window inside its scope when installing another origin.
+      if (isStandalone()) window.open(destination, "_blank", "noopener,noreferrer");
+      else window.location.assign(destination);
+      return;
     }
     if (isStandalone() || state.installed) return;
     const prompt = state.deferredInstall;
@@ -184,7 +188,7 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
       try { const url=new URL(value);if(url.protocol==="https:" && url.origin===value)state.appOrigin=value; } catch {}
       renderInstall();
       // Never automatically move an installed app to another origin: it leaves its scope.
-      if(state.appOrigin===window.location?.origin && window.location?.search?.includes("install=1") && !state.installHelpShown) {
+      if(!isStandalone() && state.appOrigin===window.location?.origin && window.location?.search?.includes("install=1") && !state.installHelpShown) {
         state.installHelpShown=true;showInstallHelp();
       }
       return false;
