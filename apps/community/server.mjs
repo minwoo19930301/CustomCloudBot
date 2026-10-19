@@ -27,6 +27,7 @@ import { createRoutines } from "./routines.mjs";
 import { verifyMail } from "./mail-auth.mjs";
 import { SUBSCRIPTION_CONNECTIONS } from "./subscription-connections.mjs";
 import { createSidebarStore } from "./sidebar.mjs";
+import { createConversationActivity } from "./conversation-activity.mjs";
 import { loadOperatorContext } from "./operator-context.mjs";
 import { createWorkspaceHub, workspacePath } from "./workspace.mjs";
 import { EFFORTS, createProviderPool, formatModelList, publicModels } from "./providers.mjs";
@@ -37,6 +38,7 @@ import { prepareMediaDir, cleanupOrphans, receiveAttachment, finalizeAttachment,
 import { createVoiceTranscriber, VOICE_MAX_BYTES } from "./voice.mjs";
 import { createMessageQueue } from "./message-queue.mjs";
 import { createNextPromptCache, NEXT_PROMPT_SYSTEM } from "./next-prompt.mjs";
+import { planForkBranches } from "./fork-branches.mjs";
 import { AVATAR_MAX_BYTES, AVATAR_MIMES, validateAvatarBytes } from "./avatar-media.mjs";
 import { createContinuation, beginTool, finishTool, snapshotContinuation, continuationPrompt } from "./message-continuation.mjs";
 import { createPushService, validateSubscription, validateEndpoint } from "./push.mjs";
@@ -220,6 +222,7 @@ export async function startCommunity(options = {}) {
     (originUrl?.protocol === "https:" ? " Secure;" : "");
   const rates = new Map();
   const roomJobs = new Set();
+  const conversationActivity = createConversationActivity({db, isBusy: id => roomJobs.has(id) || messageQueue.has(id), excludedRoomIds: [MONITOR_ROOM]});
   const activeRuns = new Map();
   const roomProgress = new Map();
   const modelStates = new Map();
@@ -482,7 +485,7 @@ export async function startCommunity(options = {}) {
       try {
         const value = JSON.parse(row.value), id = row.key.slice("lineage:".length);
         const parents = [...new Set([...(Array.isArray(value.parents) ? value.parents : []), value.parent, value.mergedFrom].filter(parent => typeof parent === "string" && roomIdPattern.test(parent) && parent !== id))];
-        return roomIdPattern.test(id) && parents.length ? [{ id, parents, parent: parents[0], throughMessageId: value.throughMessageId || null, mergedFrom: parents[1] || null, operation: value.operation === "merge" || parents.length > 1 ? "merge" : "fork" }] : [];
+        return roomIdPattern.test(id) && parents.length ? [{ id, parents, parent: parents[0], throughMessageId: value.throughMessageId || null, mergedFrom: parents[1] || null, operation: value.operation === "merge" || parents.length > 1 ? "merge" : "fork", ...(Number.isSafeInteger(value.branchIndex) && value.branchIndex > 0 ? {branchIndex: value.branchIndex} : {}) }] : [];
       } catch { return []; }
     });
   }
@@ -969,6 +972,7 @@ export async function startCommunity(options = {}) {
       const awaitingForkTitle=pendingRoomTitle(room);
       if(queuedItem && messageQueue.get(queuedItem.id)?.state!=="queued") throw failure(409,"대기 메시지가 이미 처리되었거나 취소되었습니다.");
       const messageId=insertMessageWithAttachments(room.id, user.displayName, content, user.id, scopedNonce, [...new Set(attachmentIds)],Boolean(queuedItem));
+      conversationActivity.touch(user.id, room.id);
       if(queuedItem) messageQueue.claim(queuedItem.id,messageId);
       const currentName=db.prepare("SELECT name FROM rooms WHERE id=?").get(room.id)?.name;
       needsTitle=Boolean(content.trim() && !manualRoomTitle(room.id) && (currentName==="새 대화" || awaitingForkTitle));
@@ -1681,13 +1685,14 @@ export async function startCommunity(options = {}) {
           });
           if (!db.prepare("SELECT 1 FROM messages WHERE room_id=?").get(MONITOR_ROOM)) insertMessage(MONITOR_ROOM, "bot", "서버 모니터", explainMonitor(await readMonitor(env.COMMUNITY_MONITOR_PATH)));
         }
-        const rooms = db
+        const accessibleRooms = db
           .prepare(
             "SELECT r.*,m.role member_role FROM rooms r JOIN room_members m ON r.id=m.room_id WHERE m.user_id=? ORDER BY r.created_at DESC",
           )
           .all(user.id)
-          .filter(room => { try { roomFor(room.id, user); return true; } catch { return false; } })
-          .map(room => ({...roomView(room), ...roomPreference(user.id, room.id), busy:roomJobs.has(room.id)}));
+          .filter(room => { try { roomFor(room.id, user); return true; } catch { return false; } });
+        conversationActivity.archiveInactive(user.id, {roomIds: accessibleRooms.map(room => room.id)});
+        const rooms = accessibleRooms.map(room => ({...roomView(room), ...roomPreference(user.id, room.id), busy:roomJobs.has(room.id)}));
         const memberIds = new Set(rooms.map((room) => room.id));
         return reply(res, 200, {
           rooms,
@@ -1799,10 +1804,14 @@ export async function startCommunity(options = {}) {
         throw failure(404,"찾을 수 없습니다.");
       }
       const match = url.pathname.match(
-        /^\/api\/rooms\/([a-f0-9-]{36})(?:\/(messages|invites|preferences|fork|merge|shared-copy|compact|progress|context-reset|usage|routines|export|model-control|suggestion))?$/,
+        /^\/api\/rooms\/([a-f0-9-]{36})(?:\/(messages|invites|preferences|touch|fork|merge|shared-copy|compact|progress|context-reset|usage|routines|export|model-control|suggestion))?$/,
       );
       if (!match) throw failure(404, "찾을 수 없습니다.");
       const room = roomFor(match[1], user);
+      if (match[2] === "touch" && method === "POST") {
+        conversationActivity.touch(user.id, room.id);
+        return reply(res, 200, {ok:true});
+      }
       if (match[2] === "suggestion" && method === "POST") {
         if (typeof body.afterMessageId !== "string" || !roomIdPattern.test(body.afterMessageId)) throw failure(400, "대화 기준을 확인해 주세요.");
         const model = text(body.model ?? "", 200), effort = text(body.effort ?? "", 16);
@@ -1878,6 +1887,7 @@ export async function startCommunity(options = {}) {
           db.prepare("UPDATE rooms SET name=? WHERE id=?").run(name,room.id);
           db.prepare("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("manual-title:"+room.id,"1");
           db.prepare("DELETE FROM settings WHERE key=?").run("pending-title:"+room.id);
+          conversationActivity.touch(user.id, room.id);
         });
         return reply(res,200,{room:{...roomView(roomFor(room.id,user)),...roomPreference(user.id,room.id)}});
       }
@@ -1939,26 +1949,52 @@ export async function startCommunity(options = {}) {
       if (match[2] === "fork" && method === "POST") {
         if(room.id===MONITOR_ROOM) throw failure(400,"대시보드는 Fork할 수 없습니다.");
         if(roomJobs.has(room.id)||messageQueue.has(room.id)) throw failure(409,"진행 중이거나 대기 중인 메시지가 처리된 뒤 Fork해 주세요.");
+        const branching = body.branching === true;
         let cutoff = Number.MAX_SAFE_INTEGER;
+        let throughMessageId = null;
         if (Object.hasOwn(body, "throughMessageId")) {
           const messageId = text(body.throughMessageId, 36, true);
           const message = db.prepare("SELECT rowid FROM messages WHERE id=? AND room_id=?").get(messageId, room.id);
           if (!message) throw failure(400, "분기할 메시지를 이 대화에서 다시 선택해 주세요.");
           cutoff = message.rowid;
+          throughMessageId = messageId;
+        } else if (branching) {
+          const message = db.prepare("SELECT rowid,id FROM messages WHERE room_id=? ORDER BY rowid DESC LIMIT 1").get(room.id);
+          cutoff = message?.rowid || 0;
+          throughMessageId = message?.id || null;
         }
-        const fork=transaction(()=>{
-          assertRoomCapacity(user.id);
-          const id=randomUUID();
-          db.prepare("INSERT INTO rooms VALUES(?,?,?,?,?)").run(id,room.name.slice(0,65)+" · Fork","분기한 대화",user.id,Date.now());
-          db.prepare("INSERT INTO room_members VALUES(?,?,?)").run(id,user.id,"owner");
-          if(isPersonalRoom(room)) db.prepare("INSERT INTO settings VALUES(?,?)").run("private-fork:"+id,"1");
-          if(isMailRoom(room)) db.prepare("INSERT INTO settings VALUES(?,?)").run("mail-room:"+id,"1");
-          copyTranscript(room.id, id, user.id, cutoff);
-          db.prepare("INSERT INTO settings VALUES(?,?)").run("pending-title:"+id,"1");
-          db.prepare("INSERT INTO settings VALUES(?,?)").run("lineage:"+id, JSON.stringify({ parent: room.id, parents: [room.id], operation: "fork", throughMessageId: Object.hasOwn(body, "throughMessageId") ? text(body.throughMessageId, 36, true) : null }));
-          return roomFor(id,user);
+        const forks=transaction(()=>{
+          const children = branching ? forkLinks().filter(link => {
+            if (link.operation !== "fork" || link.parent !== room.id) return false;
+            try { roomFor(link.id, user); return true; } catch { return false; }
+          }) : [];
+          const pointOrigin = throughMessageId ? messageOrigin(throughMessageId) : null;
+          const siblings = children.filter(link => {
+            if (link.throughMessageId) return link.throughMessageId === throughMessageId;
+            // Earlier tail forks did not record their cutoff. Recover it from
+            // copied messages, ignoring any messages later written in the child.
+            const inherited = db.prepare("SELECT o.origin_id FROM messages m JOIN message_origins o ON o.message_id=m.id WHERE m.room_id=? ORDER BY m.rowid DESC LIMIT 1").get(link.id);
+            return (inherited?.origin_id || null) === pointOrigin;
+          });
+          const plan = planForkBranches({sourceName: room.name, branching, siblingCount: siblings.length, children});
+          const created = plan.map(({name, branchIndex}) => {
+            // Both inserts are in this transaction: insufficient capacity for
+            // the second child rolls back the first child and its copied data.
+            assertRoomCapacity(user.id);
+            const id=randomUUID();
+            db.prepare("INSERT INTO rooms VALUES(?,?,?,?,?)").run(id,name,"분기한 대화",user.id,Date.now());
+            db.prepare("INSERT INTO room_members VALUES(?,?,?)").run(id,user.id,"owner");
+            if(isPersonalRoom(room)) db.prepare("INSERT INTO settings VALUES(?,?)").run("private-fork:"+id,"1");
+            if(isMailRoom(room)) db.prepare("INSERT INTO settings VALUES(?,?)").run("mail-room:"+id,"1");
+            copyTranscript(room.id, id, user.id, cutoff);
+            db.prepare("INSERT INTO settings VALUES(?,?)").run("pending-title:"+id,"1");
+            db.prepare("INSERT INTO settings VALUES(?,?)").run("lineage:"+id, JSON.stringify({ parent: room.id, parents: [room.id], operation: "fork", throughMessageId, ...(branching ? {branchIndex} : {}) }));
+            return roomView(roomFor(id,user));
+          });
+          conversationActivity.touch(user.id, room.id);
+          return created;
         });
-        return reply(res,201,{room:roomView(fork)});
+        return reply(res,201,{room:forks.at(-1), ...(branching ? {createdRooms:forks, branchPoint:{parentId:room.id, throughMessageId}, initialSplit:forks.length === 2} : {})});
       }
       if (match[2] === "merge" && method === "POST") {
         const sourceId = text(body.sourceId, 36, true);
@@ -1999,6 +2035,8 @@ export async function startCommunity(options = {}) {
           const imageIds = [...new Set(activeImages.map(image => attachmentMap.get(image.id)).filter(Boolean))].slice(0, 2);
           db.prepare("INSERT INTO settings VALUES(?,?)").run("context:"+id, JSON.stringify({summary:snapshot.summary, through, merged:true, imageIds}));
           db.prepare("INSERT INTO settings VALUES(?,?)").run("lineage:"+id, JSON.stringify({parent:room.id, mergedFrom:source.id, parents:[room.id,source.id], operation:"merge"}));
+          conversationActivity.touch(user.id, room.id);
+          conversationActivity.touch(user.id, source.id);
           return roomFor(id, user);
         });
         return reply(res, 201, { room: roomView(merged), contextTruncated: snapshot.truncated });
@@ -2046,11 +2084,12 @@ export async function startCommunity(options = {}) {
         if (!["pinned","archived","groupId","color"].some(key=>Object.hasOwn(body,key)) || ["pinned","archived"].some(key=>Object.hasOwn(body,key) && typeof body[key]!=="boolean")) throw failure(400,"대화 설정이 올바르지 않습니다.");
         if(Object.hasOwn(body,"color") && body.color!==null && (typeof body.color!=="string" || !/^#[0-9a-f]{6}$/i.test(body.color)))throw failure(400,"색상은 #rrggbb 형식으로 선택해 주세요.");
         const prior=roomPreference(user.id, room.id);
-        const preferences={pinned:body.pinned??Boolean(prior.pinned),archived:body.archived??Boolean(prior.archived),groupId:Object.hasOwn(body,"groupId")?sidebarStore.group(user.id,body.groupId):prior.groupId || null,color:Object.hasOwn(body,"color")?body.color?.toLowerCase()??null:prior.color||null};
+        const preferences={...prior,pinned:body.pinned??Boolean(prior.pinned),archived:body.archived??Boolean(prior.archived),groupId:Object.hasOwn(body,"groupId")?sidebarStore.group(user.id,body.groupId):prior.groupId || null,color:Object.hasOwn(body,"color")?body.color?.toLowerCase()??null:prior.color||null};
         if(preferences.archived && prior.archived!==true && (roomJobs.has(room.id)||messageQueue.has(room.id))) throw failure(409,"진행 중이거나 대기 중인 메시지가 처리된 뒤 보관해 주세요.");
         if (prior.archived === true && !preferences.archived && room.owner_id === user.id && room.id !== MONITOR_ROOM) assertRoomCapacity(user.id);
         db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("room-ui:"+user.id+":"+room.id,JSON.stringify(preferences));
-        return reply(res,200,preferences);
+        if (!preferences.archived) conversationActivity.touch(user.id, room.id);
+        return reply(res,200,roomPreference(user.id, room.id));
       }
       if (!match[2] && method === "GET") {
         const messages = db

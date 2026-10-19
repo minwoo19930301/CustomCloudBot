@@ -22,6 +22,41 @@ test('parents precede children and a merge retains both real parents and colored
   assert.deepEqual(byId.get('merge').parents,['deep','b']);assert.equal(result.edges.filter(edge=>edge.secondary).length,1);
   assert.equal(byId.get('other').operation,'root');
 });
+test('three forks stay siblings below the original instead of inheriting its continuation lane', () => {
+  const r = ['1','2','3','4'].map((id,index) => ({id,name:id,createdAt:index+1}));
+  const l = ['2','3','4'].map(id => ({id,parent:'1',operation:'fork'}));
+  const result = layoutBranches(r,l), byId = new Map(result.rows.map(row => [row.id,row]));
+  assert.deepEqual(result.rows.map(row => row.id),['1','2','3','4']);
+  assert.equal(byId.get('1').lane,0);
+  assert.equal(byId.get('1').primaryParent,null);
+  assert.deepEqual(byId.get('1').children,['2','3','4']);
+  for (const id of ['2','3','4']) {
+    assert.deepEqual(byId.get(id).parents,['1']);
+    assert.equal(byId.get(id).primaryParent,'1');
+    assert.equal(byId.get(id).lane,1);
+    assert.equal(byId.get(id).depth,1);
+  }
+  assert.deepEqual(result.edges,l.map(link => ({from:'1',to:link.id,secondary:false})));
+  const geometry = branchGraphGeometry(result), positions = new Map(geometry.nodes.map(node => [node.id,node]));
+  assert.deepEqual(geometry.paths.map(path => path.d),[
+    'M10,22V44C10,66 22,44 22,66',
+    'M10,22V88C10,110 22,88 22,110',
+    'M10,22V132C10,154 22,132 22,154'
+  ]);
+  for (const id of ['2','3','4']) assert.equal(positions.get(id).x,22);
+});
+test('nested forks have stable generation depths through search, manual placement and merges', () => {
+  const r = ['root','a','b','a1','a2','merge'].map((id,index) => ({id,name:id,createdAt:index+1}));
+  const l = [{id:'a',parent:'root'},{id:'b',parent:'root'},{id:'a1',parent:'a'},{id:'a2',parent:'a'},{id:'merge',parent:'a2',mergedFrom:'b'}];
+  const result = layoutBranches(r,l), byId = new Map(result.rows.map(row => [row.id,row]));
+  assert.deepEqual(result.rows.map(row => [row.id,row.depth]),[['root',0],['a',1],['a1',2],['a2',2],['b',1],['merge',3]]);
+  assert.deepEqual(byId.get('merge').parents,['a2','b']);
+  for (const filtered of [layoutBranches(r,l,{query:'a2'}),layoutBranches(r,l,{order:['a2','merge','root','a','b','a1']})]) {
+    for (const row of filtered.rows) assert.equal(row.depth,byId.get(row.id).depth);
+  }
+  const searched = layoutBranches(r,l,{query:'a2'});
+  assert.deepEqual(searched.edges,[{from:'root',to:'a',secondary:false},{from:'a',to:'a2',secondary:false}]);
+});
 test('search preserves ancestors of both merge parents and marks only actual matches', () => {
   const result=layoutBranches(rooms,links,{query:'MERGE'});
   assert.deepEqual(new Set(result.rows.map(row=>row.id)),new Set(['root','a','b','deep','merge']));
@@ -83,7 +118,7 @@ test('default graph keeps connected work together instead of stretching a merge 
   const r = [{id:'root',createdAt:1},{id:'other',createdAt:2},{id:'a',createdAt:3},{id:'b',createdAt:4},{id:'deep',createdAt:5},{id:'merge',createdAt:6}];
   const result = layoutBranches(r, links);
   assert.deepEqual(result.rows.map(row => row.id), ['root','a','deep','b','merge','other']);
-  assert.ok(result.laneCount <= 2);
+  assert.deepEqual(result.rows.map(row => row.depth), [0,1,2,1,3,0]);
   assert.deepEqual(layoutBranches(r, links, {order:['root','other','a','b','deep','merge']}).rows.map(row => row.id), ['root','other','a','b','deep','merge']);
 });
 

@@ -6,6 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startCommunity } from "../server.mjs";
 
+function withoutActivity(data) {
+  const {lastTouchedAt, ...room} = data.room;
+  return {...data, room};
+}
+
 async function fixture(t, complete) {
   const dir = await mkdtemp(join(tmpdir(), "branch-context-")), calls = [];
   const app = await startCommunity({ dataDir: dir, port: 0, env: { COMMUNITY_BOOTSTRAP_TOKEN: "bootstrap" }, llm: {
@@ -57,8 +62,8 @@ test("merge snapshots effective reset/compacted contexts without an AI call or m
   assert.match(f.saved(id).summary,/RIGHT_CURRENT/);
   assert.match(f.saved(id).summary,/COMPACTED_DECISION/);
   assert.doesNotMatch(f.saved(id).summary,/OLD_COMMON_EXCLUDED|RAW_COMPACT_EXCLUDED/);
-  assert.deepEqual((await f.call(`/api/rooms/${root}`,owner)).data,before[0].data);
-  assert.deepEqual((await f.call(`/api/rooms/${branch}`,owner)).data,before[1].data);
+  assert.deepEqual(withoutActivity((await f.call(`/api/rooms/${root}`,owner)).data),withoutActivity(before[0].data));
+  assert.deepEqual(withoutActivity((await f.call(`/api/rooms/${branch}`,owner)).data),withoutActivity(before[1].data));
   const transcript=(await f.call(`/api/rooms/${id}`,owner)).data.messages;
   assert.ok(transcript.some(message=>message.text==='OLD_COMMON_EXCLUDED'),"visible history remains recoverable");
   const request=await f.bot(owner,id,"CONTINUE_MERGE");
@@ -85,8 +90,8 @@ test("independent accessible sessions merge into a new context while originals a
   const callCount=f.calls.length,merged=await f.merge(member,first,second),id=merged.room.id;
   assert.notEqual(id,first);assert.notEqual(id,second);
   assert.equal(f.calls.length,callCount,"combining snapshots must not trigger a model request");
-  assert.deepEqual((await f.call(`/api/rooms/${first}`,member)).data,firstBefore);
-  assert.deepEqual((await f.call(`/api/rooms/${second}`,member)).data,secondBefore);
+  assert.deepEqual(withoutActivity((await f.call(`/api/rooms/${first}`,member)).data),withoutActivity(firstBefore));
+  assert.deepEqual(withoutActivity((await f.call(`/api/rooms/${second}`,member)).data),withoutActivity(secondBefore));
   assert.equal((await f.call(`/api/rooms/${id}`,admin)).status,404,"the new room does not inherit other participants");
   const link=(await f.call("/api/rooms",member)).data.forks.find(value=>value.id===id);
   assert.deepEqual(link.parents,[first,second]);assert.equal(link.operation,"merge");

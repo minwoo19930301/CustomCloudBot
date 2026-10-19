@@ -692,65 +692,67 @@ function renderRooms() {
   renderAccountTools(); els.roomList.replaceChildren(); updateBranchControls(); syncSessionActions();
   const colors = sessionColors(state.rooms, state.forks);
   const openIds = sidebarOpenRoomIds(), focusedId = currentBranchId();
-  if (showDeletedRooms) {
-    const archived = state.rooms.filter(room => room.archived && room.id !== MONITOR_ROOM);
-    for (const room of archived) {
-      const row = document.createElement("div"); row.className = "branch-archive-row";
-      const button = sidebarRoomButton(room), restore = document.createElement("button");
-      restore.type = "button"; restore.className = "branch-restore"; restore.textContent = "복원"; restore.dataset.roomId = room.id; restore.dataset.branchAction = "restore";
-      restore.setAttribute("aria-label", room.name + " 복원"); restore.onclick = () => void updateRoomListPreference(room, {archived:false});
-      row.append(button, restore); els.roomList.append(row);
+  const graph = layoutBranches(state.rooms.filter(room => room.id !== MONITOR_ROOM), state.forks, {order:sidebarState.roomOrder,query:sessionSearch});
+  const graphList = document.createElement("div"); graphList.className = "branch-graph";
+  const geometry = branchGraphGeometry(graph);
+  graphList.style.setProperty("--branch-rail", (geometry.paths.length ? geometry.width : 12) + "px");
+  const svg = branchSvg("svg", {class:"branch-lines", width:geometry.width, height:geometry.height, "aria-hidden":"true"});
+  const byId = new Map(graph.rows.map(row => [row.id,row]));
+  for (const edge of geometry.paths) {
+    svg.append(branchSvg("path", {d:edge.d, style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`, class:`branch-path${edge.secondary ? " is-merge" : ""}${edge.from===currentBranchId()||edge.to===currentBranchId()?" is-current":""}`}));
+  }
+  for (const row of graph.rows) {
+    const open = openIds.has(row.id), active = open && focusedId === row.id;
+    const button = document.createElement("button"); button.type="button"; button.className="branch-row"; button.dataset.roomId=row.id; button.dataset.dockRoom=row.id;
+    button.style.setProperty("--branch-row-rail",((geometry.paths.length?geometry.width:12)+Math.min(row.depth,3)*6)+"px");
+    button.classList.toggle("is-open",open); button.classList.toggle("is-selected",active); button.classList.toggle("is-ancestor",!row.matched); if(active)button.setAttribute("aria-current","page");
+    const copy=document.createElement("span"); copy.className="branch-row-copy";
+    const name=document.createElement("strong"); name.textContent=branchDisplayName(row);
+    if(row.room.pinned){const pin=icon("pin");pin.classList.add("branch-pin");pin.setAttribute("aria-label","고정됨");name.prepend(pin);}
+    const meta=document.createElement("small"), parentNames=row.parents.map(id=>byId.get(id)?.room.name).filter(Boolean);
+    const relation=row.operation==="merge"?"Merge":row.operation==="fork"?"Fork":"줄기";
+    const branchIndex=state.forks.find(link=>link.id===row.id)?.branchIndex;
+    meta.textContent=(row.operation==="merge"?"합친 대화":row.operation==="fork"?(branchIndex?`가지 ${branchIndex}`:"이어진 대화"):"")+(row.room.pinned?" · 고정":"");
+    button.title = "드래그: 목록 사이에서 순서 이동 · 제목 위에서 Merge · 대화 영역에서 분할";
+    button.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
+    button.setAttribute("aria-label", `${row.room.name}, ${relation}${parentNames.length?", "+parentNames.join(" 및 ")+"에서 이어짐":""}${active?", 현재 가지":open?", 열린 대화":""}`);
+    copy.append(name,meta); button.append(copy);
+    const grip=document.createElement("span");grip.className="session-drag-handle";grip.setAttribute("aria-hidden","true");grip.title="잡고 이동";grip.innerHTML='<svg viewBox="0 0 24 24"><path d="M8 5v14m8-14v14M5 8l3-3 3 3m2 8 3 3 3-3"/></svg>';button.append(grip);
+    paintSession(button, colors.get(row.id));
+    button.onclick=event=>{if(event.target.closest(".session-drag-handle"))return;if(state.focusPane>0)assignExtra(state.focusPane-1,row.id);else void selectRoom(row.id);closeSidebar();};
+    graphList.append(button);
+  }
+  graphList.prepend(svg); els.roomList.append(graphList);
+  if (!graph.rows.length) { const empty=document.createElement("p");empty.className="search-empty";empty.textContent=sessionSearch?"검색한 세션이 없습니다.":"위의 + 버튼으로 새 세션을 시작하세요.";els.roomList.append(empty); }
+  const archived = state.rooms.filter(room => room.archived && room.id !== MONITOR_ROOM && (!sessionSearch || room.name.toLocaleLowerCase().includes(sessionSearch.toLocaleLowerCase())));
+  if (archived.length) {
+    const section=document.createElement("section"); section.className="branch-archive-section";
+    const toggle=document.createElement("button");toggle.type="button";toggle.className="branch-archive-toggle";toggle.dataset.branchAction="archive-toggle";
+    toggle.textContent=(showDeletedRooms?"보관된 대화 접기":"보관된 대화 더보기")+` (${archived.length})`;
+    toggle.setAttribute("aria-expanded",String(showDeletedRooms));toggle.setAttribute("aria-controls","archived-conversation-list");
+    toggle.onclick=()=>{showDeletedRooms=!showDeletedRooms;renderRooms();};section.append(toggle);
+    const list=document.createElement("div");list.id="archived-conversation-list";list.hidden=!showDeletedRooms;
+    if(showDeletedRooms) for(const room of archived) {
+      const row=document.createElement("div");row.className="branch-archive-row";
+      const name=document.createElement("span");name.className="branch-archive-name";name.textContent=room.name;name.title=room.name;
+      const restore=document.createElement("button");restore.type="button";restore.className="branch-restore";restore.textContent="복원";restore.dataset.roomId=room.id;restore.dataset.branchAction="restore";
+      restore.setAttribute("aria-label",room.name+" 복원");restore.onclick=async()=>{restore.disabled=true;await updateRoomListPreference(room,{archived:false});if(restore.isConnected)restore.disabled=false;};
+      row.append(name,restore);list.append(row);
     }
-    if (!archived.length) { const empty = document.createElement("p"); empty.className = "search-empty"; empty.textContent = "보관된 가지가 없습니다."; els.roomList.append(empty); }
-  } else {
-    const graph = layoutBranches(state.rooms.filter(room => room.id !== MONITOR_ROOM), state.forks, {order:sidebarState.roomOrder,query:sessionSearch});
-    const graphList = document.createElement("div"); graphList.className = "branch-graph";
-    const geometry = branchGraphGeometry(graph);
-    graphList.style.setProperty("--branch-rail", (geometry.paths.length ? geometry.width : 12) + "px");
-    const svg = branchSvg("svg", {class:"branch-lines", width:geometry.width, height:geometry.height, "aria-hidden":"true"});
-    const byId = new Map(graph.rows.map(row => [row.id,row]));
-    for (const edge of geometry.paths) {
-      svg.append(branchSvg("path", {d:edge.d, style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`, class:`branch-path${edge.secondary ? " is-merge" : ""}${edge.from===currentBranchId()||edge.to===currentBranchId()?" is-current":""}`}));
-    }
-    for (const row of graph.rows) {
-      const open = openIds.has(row.id), active = open && focusedId === row.id;
-      const button = document.createElement("button"); button.type="button"; button.className="branch-row"; button.dataset.roomId=row.id; button.dataset.dockRoom=row.id;
-      button.classList.toggle("is-open",open); button.classList.toggle("is-selected",active); button.classList.toggle("is-ancestor",!row.matched); if(active)button.setAttribute("aria-current","page");
-      const copy=document.createElement("span"); copy.className="branch-row-copy";
-      const name=document.createElement("strong"); name.textContent=branchDisplayName(row);
-      if(row.room.pinned){const pin=icon("pin");pin.classList.add("branch-pin");pin.setAttribute("aria-label","고정됨");name.prepend(pin);}
-      const meta=document.createElement("small"), parentNames=row.parents.map(id=>byId.get(id)?.room.name).filter(Boolean);
-      const relation=row.operation==="merge"?"Merge":row.operation==="fork"?"Fork":"줄기";
-      meta.textContent=(row.operation==="merge"?"합친 대화":row.operation==="fork"?"이어진 대화":"")+(row.room.pinned?" · 고정":"");
-      button.title = "드래그: 목록 사이에서 순서 이동 · 제목 위에서 Merge · 대화 영역에서 분할";
-      button.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
-      button.setAttribute("aria-label", `${row.room.name}, ${relation}${parentNames.length?", "+parentNames.join(" 및 ")+"에서 이어짐":""}${active?", 현재 가지":open?", 열린 대화":""}`);
-      copy.append(name,meta); button.append(copy);
-      const grip=document.createElement("span");grip.className="session-drag-handle";grip.setAttribute("aria-hidden","true");grip.title="잡고 이동";grip.innerHTML='<svg viewBox="0 0 24 24"><path d="M8 5v14m8-14v14M5 8l3-3 3 3m2 8 3 3 3-3"/></svg>';button.append(grip);
-      paintSession(button, colors.get(row.id));
-      button.onclick=event=>{if(event.target.closest(".session-drag-handle"))return;if(state.focusPane>0)assignExtra(state.focusPane-1,row.id);else void selectRoom(row.id);closeSidebar();};
-      graphList.append(button);
-    }
-    graphList.prepend(svg); els.roomList.append(graphList);
-    if (!graph.rows.length) { const empty=document.createElement("p");empty.className="search-empty";empty.textContent=sessionSearch?"검색한 세션이 없습니다.":"위의 + 버튼으로 새 세션을 시작하세요.";els.roomList.append(empty); }
+    section.append(list);els.roomList.append(section);
   }
   syncSessionColors(colors);
   syncSessionActivity();
   if(focus){const target=$$("button",els.roomList).find(button=>button.dataset.roomId===focus.roomId&&button.dataset.branchAction===focus.action);target?.focus({preventScroll:true});}
 }
 function openArchivedConversations() {
-  const dialog = document.createElement("dialog"); dialog.className = "archived-dialog";
-  const header = document.createElement("header"), title = document.createElement("h2"), close = document.createElement("button");
-  title.textContent = "대화 복원"; close.type = "button"; close.textContent = "×"; close.setAttribute("aria-label", "닫기"); close.onclick = () => dialog.close(); header.append(title, close); dialog.append(header);
-  const archived = state.rooms.filter(room => room.archived && room.id !== MONITOR_ROOM);
-  if (!archived.length) { const empty = document.createElement("p"); empty.textContent = "복원할 대화가 없습니다."; dialog.append(empty); }
-  for (const room of archived) {
-    const row = document.createElement("div"), name = document.createElement("span"), restore = document.createElement("button"); row.className = "archived-dialog-row";
-    name.textContent = room.name; restore.type = "button"; restore.textContent = "복원"; restore.setAttribute("aria-label", room.name + " 복원");
-    restore.onclick = async () => { restore.disabled = true; await updateRoomListPreference(room, {archived:false}); if (!state.rooms.find(item => item.id === room.id)?.archived) row.remove(); else restore.disabled = false; };
-    row.append(name, restore); dialog.append(row);
-  }
-  dialog.addEventListener("close", () => { dialog.remove(); $("#profile-customize").focus(); }); document.body.append(dialog); dialog.showModal();
+  showDeletedRooms=true;renderRooms();
+  const toggle=$(".branch-archive-toggle",els.roomList);
+  if(toggle){toggle.scrollIntoView({block:"nearest",behavior:"smooth"});toggle.focus({preventScroll:true});}
+  else toast("보관된 대화가 없습니다.");
+}
+function touchConversation(id) {
+  if(id && id!==MONITOR_ROOM) void api(`/api/rooms/${encodeURIComponent(id)}/touch`,{method:"POST",body:"{}"}).catch(()=>{});
 }
 function showEmpty() {
   modelFailoverUI?.reset();
@@ -774,6 +776,7 @@ function showEmpty() {
 async function selectRoom(id) {
   closeComposerPicker();
   if (!id) return;
+  touchConversation(id);
   closeContextPopover();
   const previous = state.selectedRoom;
   if(previous!==id && !matchMedia("(prefers-reduced-motion: reduce)").matches) els.roomView.animate([{opacity:.35,transform:"translateY(7px)"},{opacity:1,transform:"translateY(0)"}],{duration:320,easing:"cubic-bezier(.2,.8,.2,1)"});
@@ -1454,7 +1457,7 @@ async function offerTopicChoice(pane,draft) {
     if(choice==="stay")return false;
     if(roomContextOwner(pane).busy){toast("답변이 끝난 뒤 다시 보내 주세요.");return true;}
     sourceInput.disabled=true;locked=true;
-    const result=await api(choice==="fork"?`/api/rooms/${encodeURIComponent(roomId)}/fork`:"/api/rooms",{method:"POST",body:"{}"});
+    const result=await api(choice==="fork"?`/api/rooms/${encodeURIComponent(roomId)}/fork`:"/api/rooms",{method:"POST",body:JSON.stringify(choice==="fork"?{branching:true}:{})});
     if(!current())return true;
     saveRoomPreferences(result.room.id,{model,effort});
     await loadRooms();if(!current())return true;
@@ -1654,7 +1657,7 @@ async function openBranchResult(data, destination) {
   showDeletedRooms=false;
   if(destination.pane)assignExtra(state.extra.indexOf(destination.pane),data.room.id);else await selectRoom(data.room.id);
   renderRooms();closeSidebar();
-  toast(data.contextTruncated?"맥락이 길어 일부만 이어받았습니다. 원본 가지에서 전체 기록을 볼 수 있어요.":"새 가지를 만들었습니다. 원본은 그대로 남습니다.");
+  toast(data.contextTruncated?"맥락이 길어 일부만 이어받았습니다. 원본 가지에서 전체 기록을 볼 수 있어요.":data.createdRooms?.length>1?"원본을 남기고 하위 대화 2개를 만들었습니다.":"새 가지를 만들었습니다. 원본은 그대로 남습니다.");
 }
 function mergeBranch(roomId, sourceId = null) {
   const room=state.rooms.find(item=>item.id===roomId&&!item.archived), branches=mergeCandidates(roomId);
@@ -1694,7 +1697,7 @@ async function sessionAction(action, pane = null, button = null, throughMessageI
   if(action==="compact"&&!owner.canManage)return;
   if(button)button.disabled=true;branchOperations.add(roomId);updateModelAvailability();
   try {
-    const data=await api(`/api/rooms/${encodeURIComponent(roomId)}/${action}`,{method:"POST",body:JSON.stringify(throughMessageId?{throughMessageId}:{})});
+    const data=await api(`/api/rooms/${encodeURIComponent(roomId)}/${action}`,{method:"POST",body:JSON.stringify({...(throughMessageId?{throughMessageId}:{}),...(action==="fork"?{branching:true}:{})})});
     if(!destination.valid())return;
     if(action==="fork")await openBranchResult(data,destination);
     else if(destination.current()){await refreshContextOwner(pane);toast("기록은 보존하고 대화 맥락을 압축했습니다.");}
@@ -2425,6 +2428,7 @@ function assignExtra(index, roomId) {
   });
   clearAttachmentDraft(pane);
   pane.roomId = roomId;
+  touchConversation(roomId);
   pane.data = null;
   pane.busy = false;
   renderExtraPanes();

@@ -41,24 +41,23 @@ export function layoutBranches(rooms, links, {query = '', order = []} = {}) {
     }
     const id = ready[0]; pending.delete(id); placedAt.set(id, ordered.length); ordered.push(id);
   }
+  // A lane is a generation, not a reusable slot. All children of a fork stay
+  // one level below their parent, even when the last child is rendered. In
+  // particular, none of the siblings silently becomes the parent's main line.
+  const depths = new Map();
+  for (const id of ordered) depths.set(id, parents.get(id).length ? Math.max(...parents.get(id).map(parent => depths.get(parent) ?? 0)) + 1 : 0);
   const needle = query.trim().toLocaleLowerCase();
   const matches = new Set(ordered.filter(id => !needle || [nodes.get(id).name, nodes.get(id).description].join(' ').toLocaleLowerCase().includes(needle)));
   const visible = new Set([...matches].flatMap(id => [...ancestry(id, parents)]));
   const ids = ordered.filter(id => visible.has(id));
   const children = new Map(ids.map(id => [id, []]));
   for (const id of ids) for (const parent of parents.get(id)) if (visible.has(parent)) children.get(parent).push(id);
-  const remaining = new Map(ids.map(id => [id, children.get(id).length])), occupied = new Map(), placed = new Map(), rows = [];
+  const placed = new Map(), rows = [];
   for (const id of ids) {
     const prior = parents.get(id).filter(parent => placed.has(parent));
-    for (const parent of prior) {
-      remaining.set(parent, remaining.get(parent) - 1);
-      if (!remaining.get(parent)) occupied.delete(placed.get(parent).lane);
-    }
-    let lane = prior.length ? placed.get(prior[0]).lane : 0;
-    if (occupied.has(lane)) { lane = 0; while (occupied.has(lane)) lane += 1; }
-    const row = {room: nodes.get(id), id, parents: prior, children: children.get(id), lane, index: rows.length, matched: matches.has(id), operation: prior.length ? (prior.length > 1 || operations.get(id) === 'merge' ? 'merge' : 'fork') : 'root'};
+    const depth = depths.get(id);
+    const row = {room: nodes.get(id), id, parents: prior, children: children.get(id), lane: depth, depth, primaryParent: prior[0] || null, index: rows.length, matched: matches.has(id), operation: prior.length ? (prior.length > 1 || operations.get(id) === 'merge' ? 'merge' : 'fork') : 'root'};
     rows.push(row); placed.set(id, row);
-    if (remaining.get(id)) occupied.set(lane, id);
   }
   const edges = rows.flatMap(row => row.parents.map((parent, index) => ({from: parent, to: row.id, secondary: index > 0})));
   // User placement changes display positions, never lineage or the lanes derived
@@ -80,12 +79,15 @@ export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {row
     const from = byId.get(edge.from), to = byId.get(edge.to);
     if (!from || !to) continue;
     const direction = to.y >= from.y ? 1 : -1, low = Math.min(from.y, to.y), high = Math.max(from.y, to.y);
-    const verticalX = edge.secondary ? from.x : to.x;
+    // Sibling forks share their parent's trunk and turn only at the child.
+    // Running down the child lane would make the first sibling look like the
+    // parent of every sibling below it.
+    const verticalX = from.x;
     const blocked = nodes.some(node => node.y > low && node.y < high && node.x === verticalX);
     let d;
     if (blocked) {
       // Reuse a route once its interval ends. A long merge cannot run straight
-      // through a different session's dot or acquire a dotted pseudo-branch.
+      // through a different session's endpoint or acquire a false branch.
       let route = routes.findIndex(intervals => intervals.every(([start, end]) => high <= start || low >= end));
       if (route < 0) { route = routes.length; routes.push([]); }
       routes[route].push([low, high]);
@@ -95,9 +97,7 @@ export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {row
       d = `M${from.x},${from.y}V${to.y}`;
     } else {
       const bend = Math.min(22, (high - low) / 2);
-      d = edge.secondary
-        ? `M${from.x},${from.y}V${to.y - bend * direction}C${from.x},${to.y} ${to.x},${to.y - bend * direction} ${to.x},${to.y}`
-        : `M${from.x},${from.y}C${from.x},${from.y + bend * direction} ${to.x},${from.y} ${to.x},${from.y + bend * direction}V${to.y}`;
+      d = `M${from.x},${from.y}V${to.y - bend * direction}C${from.x},${to.y} ${to.x},${to.y - bend * direction} ${to.x},${to.y}`;
     }
     paths.push({...edge, d});
   }

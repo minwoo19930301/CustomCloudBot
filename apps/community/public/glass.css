@@ -545,3 +545,11 @@ dialog::backdrop,
   backdrop-filter: none;
 }
 .room-view .message.own .message-body > p, .room-view .message.own .message-copy { background:rgba(var(--pane-tint),.16); }
+
+/* Archived conversations expand beneath the active tree without replacing it. */
+.branch-archive-section { margin:14px 4px 4px; }
+.branch-archive-toggle { width:100%; padding:9px 8px; text-align:left; background:transparent; color:var(--muted); font-size:11px; cursor:pointer; border-radius:8px; }
+.branch-archive-toggle:hover,.branch-archive-toggle:focus-visible { background:#ffffff32; color:var(--text); }
+.branch-archive-row { min-height:36px; padding:0 8px; gap:8px; }
+.branch-archive-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
+.branch-archive-row .branch-restore { color:var(--glass-accent); cursor:pointer; }

@@ -110,7 +110,9 @@ test('color preferences are member-specific, partial, validated, resettable and 
   assert.equal((await f.call('/api/sidebar',{auth:owner,method:'PUT',body:{width:280,groups:[{id:groupId,name:'업무',collapsed:false}]}})).status,200);
   assert.equal((await f.call(path,{auth:owner,body:{pinned:true,archived:false,groupId}})).status,200);
   const changed=await color(owner,'#aBcDeF');
-  assert.deepEqual(changed.data,{pinned:true,archived:false,groupId,color:'#abcdef'});
+  const {lastTouchedAt,...preferences}=changed.data;
+  assert.ok(Number.isSafeInteger(lastTouchedAt) && lastTouchedAt>0);
+  assert.deepEqual(preferences,{pinned:true,archived:false,groupId,color:'#abcdef'});
   assert.equal((await color(member,'#123456')).status,200);
   // Old clients changing pin state must not erase a color saved by a newer UI.
   assert.equal((await f.call(path,{auth:owner,body:{pinned:false,archived:false}})).data.color,'#abcdef');

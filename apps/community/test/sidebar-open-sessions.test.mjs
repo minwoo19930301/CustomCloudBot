@@ -61,7 +61,7 @@ function fixture({open = ['a', 'b'], focus = 0} = {}) {
     renderAccountTools() {}, updateBranchControls() {}, syncSessionActions() {}, syncSessionColors() {},
     $: selector => nodes[selector], $$: find, icon: () => new Element('svg'),
     closeBotPickers() {}, clearAttachmentDraft() {}, disposeTranscript() {}, applyDockLayout() {}, syncProgressStreams() {},
-    refreshExtras() {}, refreshExtra() {}, roomPreferences: () => ({}), composerRecorder: null, toast() {},
+    refreshExtras() {}, refreshExtra() {}, touchConversation() {}, roomPreferences: () => ({}), composerRecorder: null, toast() {},
     renderExtraPanes() {
       find('.extra-pane').forEach(node => node.remove());
       state.extra.forEach(() => { const node = new Element('section'); node.className = 'extra-pane'; grid.append(node); });
@@ -154,4 +154,25 @@ test('the alternate room button shares open/focused semantics with the branch gr
     assert.equal(button.classList.contains('is-selected'), id === 'b');
     assert.equal(button.getAttribute('aria-current'), id === 'b' ? 'page' : null);
   }
+});
+
+test('archived conversations expand below the active tree and restore without replacing open sessions', async () => {
+  const app = fixture();
+  app.state.rooms.push({id:'old',name:'이전 아이디어',archived:true,createdAt:0});
+  app.runtime.updateRoomListPreference = async (room,changes) => {Object.assign(room,changes);app.runtime.renderRooms();return true;};
+  const all = () => descendants(app.runtime.els.roomList);
+  const toggle = () => all().find(node => node.dataset.branchAction === 'archive-toggle');
+  app.runtime.renderRooms();
+  assert.equal(toggle().getAttribute('aria-expanded'),'false');
+  assert.equal(all().filter(node => node.dataset.branchAction === 'restore').length,0);
+  assertSelection(app,['a','b'],'a');
+  toggle().onclick();
+  assert.equal(toggle().getAttribute('aria-expanded'),'true');
+  assertSelection(app,['a','b'],'a');
+  assert.equal(app.row('old'),undefined);
+  const restore=all().find(node => node.dataset.branchAction === 'restore');
+  await restore.onclick();
+  assert.ok(app.row('old'));
+  assert.equal(toggle(),undefined);
+  assertSelection(app,['a','b'],'a');
 });
