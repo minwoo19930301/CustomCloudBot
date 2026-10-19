@@ -53,7 +53,7 @@ const BOTS = [
   {
     id: "bot-analyst",
     name: "Agent Bot",
-    description: "질문을 나누고 근거와 선택지를 정리합니다.",
+    description: "사용자의 요청에 따라 분석, 설계, 실행, 검토를 수행합니다.",
   },
   {
     id: "bot-creative",

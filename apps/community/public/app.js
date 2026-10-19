@@ -35,7 +35,6 @@ const state = {
   selectedRoom: null,
   roomData: null,
   selectedBots: [],
-  botChoiceTouched: false,
   pollTimer: null,
   pollBusy: false,
   activityBusy: false,
@@ -273,7 +272,6 @@ function showAuth() {
   branchOperations.clear();
   state.bots = [];
   state.selectedBots = [];
-  state.botChoiceTouched = false;
   state.pendingSend = null;
   state.sending = false;
   $("#message-input").disabled=false;$("#send-button").disabled=false;
@@ -367,17 +365,10 @@ async function loadRooms() {
     state.rooms = data.rooms || [];
     state.forks = data.forks || [];
     state.bots = data.bots || [];
-    if (
-      state.session?.model?.configured &&
-      state.bots.length &&
-      !state.botChoiceTouched
-    ) {
-      state.selectedBots = [state.bots[0].id];
-    }
+    state.selectedBots = state.bots.length ? [state.bots[0].id] : [];
     els.usage.textContent = "";
     els.usage.title = data.usage ? `앱의 하루 호출 사용량 ${data.usage.used} / ${data.usage.limit}회 · 공급자 잔여량과 별개` : "";
     renderRooms();
-    renderBotPicker();
     const activeRooms = state.rooms.filter(room => !room.archived && room.id !== MONITOR_ROOM);
     if (!state.rooms.some(room => room.id === state.selectedRoom && !room.archived)) {
       if (!activeRooms.length) { showEmpty(); return; }
@@ -764,7 +755,6 @@ function openArchivedConversations() {
 function showEmpty() {
   modelFailoverUI?.reset();
   cancelActiveRecording();
-  closeBotPickers();
   disposeTranscript(els.messages);
   closeComposerPicker();
   clearPendingAttachments();
@@ -825,7 +815,6 @@ async function selectRoom(id) {
     $("#room-invite-button").classList.toggle("is-hidden", !canInvite);
   }
   els.roomView.classList.toggle("is-host-dashboard", id === MONITOR_ROOM);
-  updateBotLabel();
   if (state.layout > 1) {
     renderExtraPanes();
     refreshExtras();
@@ -1335,57 +1324,6 @@ function discardPendingMessage(message, roomId) {
   if (message.retrying || message.pending !== "failed" || pendingMessages.get(roomId) !== message) return;
   pendingMessages.delete(roomId); paintPending(roomId);
 }
-function renderBotPicker(picker = $("#bot-picker")) {
-  picker.replaceChildren();
-  if (!state.bots.length) {
-    const note = document.createElement("span");
-    note.className = "picker-note";
-    note.textContent = "사용 가능한 봇이 없습니다.";
-    picker.append(note);
-    return;
-  }
-  state.bots.forEach((bot) => {
-    const label = document.createElement("label");
-    label.className = "bot-option";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = bot.id;
-    checkbox.checked = state.selectedBots.includes(bot.id);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked && state.selectedBots.length >= 3) {
-        checkbox.checked = false;
-        toast("한 번에 최대 3개의 봇을 선택할 수 있어요.");
-        return;
-      }
-      state.selectedBots = $$(".bot-option input:checked", picker).map(
-        (input) => input.value,
-      );
-      state.botChoiceTouched = true;
-      updateBotLabel();
-    });
-    const copy = document.createElement("span");
-    const name = document.createElement("strong");
-    name.textContent = bot.name;
-    const desc = document.createElement("small");
-    desc.textContent = bot.description || "";
-    copy.append(name, desc);
-    label.append(checkbox, copy);
-    picker.append(label);
-  });
-  updateBotLabel();
-}
-function updateBotLabel() {
-  $("#bot-picker-label").textContent = "";
-  $("#bot-picker-label").hidden = true;
-  const names=state.selectedBots.map(id=>state.bots.find(bot=>bot.id===id)?.name).filter(Boolean);
-  const label=names.length?names[0]+(names.length>1?` +${names.length-1}`:""):"봇 선택";
-  for(const trigger of $$(".bot-selector-trigger")) {
-    setPickerTrigger(trigger,label);
-    trigger.title=names.length?`응답할 봇: ${names.join(", ")}`:"응답할 봇 선택";
-    trigger.setAttribute("aria-label",names.length?`응답할 봇 선택: ${names.join(", ")}`:"응답할 봇 선택");
-  }
-}
-
 function clearPendingAttachments(pane = null) {
   clearAttachmentDraft(pane || state);
   renderPendingAttachments(pane);
@@ -1486,42 +1424,6 @@ function toggleRecording(pane=null) {
   const owner=pane||state;
   void composerRecorder.start({pane,roomId:pane?pane.roomId:state.selectedRoom,userId:state.session?.user?.id,csrfToken:state.session?.csrfToken,attachmentGeneration:owner.attachmentGeneration});
 }
-let activeBotPicker=null;
-function closeBotPickers() {
-  const open=activeBotPicker;activeBotPicker=null;
-  if(open) {
-    window.removeEventListener("resize",open.position);window.removeEventListener("scroll",open.position,true);
-    try{if(open.picker.matches(":popover-open"))open.picker.hidePopover();}catch{}
-    open.picker.removeAttribute("popover");open.picker.classList.remove("is-floating");open.picker.style.left="";open.picker.style.top="";
-    open.parent.append(open.picker);
-  }
-  for(const picker of $$(".bot-picker"))picker.classList.add("is-hidden");
-  for(const trigger of $$(".bot-selector-trigger"))trigger.setAttribute("aria-expanded","false");
-}
-function toggleBotPicker(trigger,picker) {
-  const opening=picker.classList.contains("is-hidden");closeBotPickers();closeComposerPicker();closeContextPopover();
-  if(!opening)return;
-  const parent=picker.parentElement;renderBotPicker(picker);inheritSessionTheme(picker,trigger);
-  picker.classList.remove("is-hidden");picker.classList.add("is-floating");trigger.setAttribute("aria-expanded","true");
-  const position=()=>{
-    if(!trigger.isConnected){closeBotPickers();return;}
-    const rect=trigger.getBoundingClientRect(),width=picker.offsetWidth,height=picker.offsetHeight;
-    picker.style.left=Math.max(12,Math.min(rect.left,innerWidth-width-12))+"px";
-    picker.style.top=Math.max(12,Math.min(rect.top-height-8,innerHeight-height-12))+"px";
-  };
-  activeBotPicker={trigger,picker,parent,position};
-  document.body.append(picker);
-  if(typeof picker.showPopover==="function") {picker.setAttribute("popover","auto");picker.showPopover();picker.ontoggle=event=>{if(event.newState==="closed"&&activeBotPicker?.picker===picker)closeBotPickers();};}
-  position();window.addEventListener("resize",position);window.addEventListener("scroll",position,true);
-  picker.onkeydown=event=>{
-    if(event.key==="Escape"){event.preventDefault();event.stopPropagation();closeBotPickers();trigger.focus();}
-    else if(["ArrowDown","ArrowUp","Home","End"].includes(event.key)) {
-      const inputs=$$("input",picker);if(!inputs.length)return;
-      event.preventDefault();const index=inputs.indexOf(document.activeElement),next=event.key==="Home"?0:event.key==="End"?inputs.length-1:(index+(event.key==="ArrowDown"?1:-1)+inputs.length)%inputs.length;inputs[next].focus();
-    }
-  };
-  ($("input:checked",picker)||$("input",picker))?.focus({preventScroll:true});
-}
 function topicChoiceDialog() {
   return new Promise(resolve=>{
     const dialog=sidebarDialog("다른 일을 시작하시나요?");dialog.classList.add("topic-choice-dialog");
@@ -1579,7 +1481,7 @@ async function submitMessage(event, skipTopic = false) {
   const attachments = state.pendingAttachments.filter((item) => item.attachment && !item.error);
   const attachmentGeneration = state.attachmentGeneration;
   const roomId = state.selectedRoom,
-    botIds = [...state.selectedBots];
+    botIds = state.selectedBots.slice(0, 1);
   if (pendingMessages.get(roomId)?.pending === "failed") { toast("보내지 못한 메시지를 다시 보내거나 삭제한 뒤 전송해 주세요."); return; }
   if (state.pendingAttachments.some((item) => item.uploading)) {
     toast("첨부 파일 업로드가 끝날 때까지 기다려주세요.");
@@ -1907,7 +1809,7 @@ function renderUsageSection(section, usage) {
 }
 async function openContextPopover(trigger,pane) {
   if(contextPopover?.trigger===trigger){closeContextPopover();return;}
-  closeContextPopover();closeBotPickers();closeComposerPicker();
+  closeContextPopover();closeComposerPicker();
   const {roomId,data}=roomContextOwner(pane),userId=state.session?.user?.id;if(!roomId)return;
   const native=typeof HTMLElement.prototype.showPopover==="function";
   const element=contextElement(native?"div":"dialog",undefined,"context-popover");element.setAttribute("role","dialog");element.setAttribute("aria-label","컨텍스트 및 API 사용량");if(native)element.setAttribute("popover","auto");
@@ -2134,7 +2036,7 @@ function closeComposerPicker(restoreFocus=false) {
 }
 function openComposerPicker(trigger,title,options,{after}={}) {
   if(composerPicker?.trigger===trigger){closeComposerPicker(true);return;}
-  closeComposerPicker();closeBotPickers();closeContextPopover();
+  closeComposerPicker();closeContextPopover();
   const element=contextElement("div",undefined,"composer-picker");element.setAttribute("role","menu");element.setAttribute("aria-label",title);element.setAttribute("popover","auto");
   inheritSessionTheme(element,trigger);
   element.append(contextElement("div",title,"picker-heading"));
@@ -2220,7 +2122,6 @@ function openModelBrowser(select,trigger,{onChoose}={}) {
   render();modelBrowser.showModal();search.focus();
 }
 function setLayout(count) {
-  closeBotPickers();
   if (!state.selectedRoom || count < 2 || count > 8) return;
   state.extra.forEach(pane => clearAttachmentDraft(pane));
   if (state.layout === count) {
@@ -2265,7 +2166,6 @@ function setLayout(count) {
 function renderExtraPanes() {
   if(contextPopover?.pane)closeContextPopover();
   closeComposerPicker();
-  closeBotPickers();
   composerRecorder?.cancelIfStale();
   syncProgressStreams();
   const grid = $("#pane-grid");
@@ -2324,10 +2224,6 @@ function renderExtraPanes() {
     controls.append(modelSelect(pane), effortSelect(pane));
     const tools=document.createElement("div");tools.className="composer-tools";
     const footer=document.createElement("div");footer.className="composer-footer";footer.setAttribute("role","group");footer.setAttribute("aria-label","메시지 도구");
-    const leading=contextElement("div",undefined,"composer-leading-tools"),botTrigger=contextElement("button",undefined,"bot-picker-button bot-selector-trigger"),botPicker=contextElement("div",undefined,"bot-picker is-hidden");
-    botTrigger.type="button";setPickerTrigger(botTrigger,"봇 선택");botTrigger.setAttribute("aria-label","응답할 봇 선택");botTrigger.title="응답할 봇 선택";botTrigger.setAttribute("aria-haspopup","dialog");botTrigger.setAttribute("aria-expanded","false");
-    botPicker.id="pane-bot-picker-"+index;botPicker.setAttribute("role","dialog");botPicker.setAttribute("aria-label","응답할 봇 선택");botTrigger.setAttribute("aria-controls",botPicker.id);
-    botTrigger.onclick=event=>{event.stopPropagation();toggleBotPicker(botTrigger,botPicker);};leading.append(botTrigger,botPicker);
     const row = document.createElement("div");
     row.className = "composer-row";
     const input = document.createElement("textarea");
@@ -2361,7 +2257,7 @@ function renderExtraPanes() {
     const mic=contextElement("button",undefined,"bot-picker-button record-button"),cancel=contextElement("button","취소","record-cancel-button");
     mic.type=cancel.type="button";mic._pane=pane;mic.append(icon("mic"));mic.setAttribute("aria-label","음성 녹음 시작");mic.title="음성 녹음";mic.onclick=()=>toggleRecording(pane);cancel.hidden=true;cancel.onclick=cancelActiveRecording;
     row.append(input);
-    footer.append(attach,fileInput,mic,cancel,leading,controls,send);
+    footer.append(attach,fileInput,mic,cancel,controls,send);
     const attachmentList = document.createElement("div");
     attachmentList.className = "attachment-list"; attachmentList.setAttribute("aria-live", "polite");
     form.append(tools, row, attachmentList, footer);
@@ -2378,7 +2274,6 @@ function renderExtraPanes() {
 
   });
   applyModels(state.models);
-  updateBotLabel();
   syncRecordingButtons();
   applyDockLayout();
 }
@@ -2432,7 +2327,7 @@ async function submitPane(event, index, skipTopic = false) {
   if(!skipTopic && !attachments.length && await offerTopicChoice(pane,text))return;
   if(!sendCurrent() || !contextOwnerCurrent(roomId,userId,pane)||composerBlocked(pane))return;
   const attachmentIds = attachments.map(item => item.attachment.id);
-  const model = $(".model-select", form).value, effort = $(".effort-select", form).value, botIds = [...state.selectedBots];
+  const model = $(".model-select", form).value, effort = $(".effort-select", form).value, botIds = state.selectedBots.slice(0, 1);
   const signature=JSON.stringify({roomId,text,attachmentIds,model,effort,botIds});
   if(pane.pendingSend?.signature!==signature)pane.pendingSend={signature,nonce:crypto.randomUUID()};
   const nonce=pane.pendingSend.nonce;
@@ -2549,13 +2444,9 @@ function bind() {
   $("#session-search").addEventListener("keydown",event=>{if(event.key==="Escape"){event.stopPropagation();$("#sidebar-search-toggle").click();$("#sidebar-search-toggle").focus();}});
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      closeBotPickers();
       els.memberPanel.classList.remove("is-open");
       closeSidebar();
     }
-  });
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest(".bot-picker, .bot-selector-trigger")) closeBotPickers();
   });
   $$("[data-auth-tab]").forEach((button) =>
     button.addEventListener("click", () => switchAuth(button.dataset.authTab)),
@@ -2624,7 +2515,6 @@ function bind() {
     event.target.style.height = "auto";
     event.target.style.height = `${Math.min(event.target.scrollHeight, 140)}px`;
   });
-  $("#bot-picker-button").addEventListener("click", event => {event.stopPropagation();toggleBotPicker(event.currentTarget,$("#bot-picker"));});
   $("#members-toggle").addEventListener("click", () =>
     els.memberPanel.classList.toggle("is-open"),
   );

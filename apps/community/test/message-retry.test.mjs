@@ -74,7 +74,7 @@ function fixture({ paneMode = false, text = '사진을 확인해 줘', busy = fa
     functionSource('function recordingBlocksSend(', 'function syncRecordingButtons(') +
     functionSource('async function submitMessage(', 'async function authSubmit(') +
     functionSource('async function submitPane(', 'async function refreshExtra(') +
-    functionSource('async function retryPendingMessage(', 'function renderBotPicker(') +
+    functionSource('async function retryPendingMessage(', 'function clearPendingAttachments(') +
     functionSource('function composerBlocked(', 'function updateModelAvailability(') +
     '\nthis.submit=()=> ' + (paneMode ? 'submitPane({preventDefault(){},currentTarget:form},0,true)' : 'submitMessage({preventDefault(){}},true)') + ';' +
     '\nthis.retry=retryPendingMessage;this.discard=discardPendingMessage;', runtime,
@@ -110,7 +110,7 @@ for (const paneMode of [false, true]) {
       assert.ok(Object.isFrozen(message.retry));
       assert.equal(payload.text, text);
       assert.deepEqual(payload.attachmentIds, ['original-image']);
-      assert.deepEqual(payload.botIds, ['researcher', 'writer']);
+      assert.deepEqual(payload.botIds, ['researcher'], 'new sends use only the default agent even with stale multi-role state');
       assert.equal(payload.model, 'original-model');
       assert.equal(payload.effort, 'high');
       assert.equal(payload.clientNonce, 'nonce-1');

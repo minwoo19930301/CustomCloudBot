@@ -190,7 +190,7 @@ input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
 .sidebar-dialog, .profile-settings-dialog, .room-sharing-dialog, .archived-dialog, .session-edit-dialog,
 .routines-dialog, .voice-call-dialog, .setup-dialog, .mail-dialog,
 .capability-hub, .context-popover, .notification-panel, .dock-menu,
-.bot-picker, .image-dialog, .member-panel, .toast, .workspace-popup, .profile-menu {
+.image-dialog, .member-panel, .toast, .workspace-popup, .profile-menu {
   background: var(--glass-panel);
   color: var(--text);
   border-color: var(--glass-edge);
@@ -250,7 +250,6 @@ dialog::backdrop,
 .composer-footer .context-controls .context-trigger,
 .composer-footer .bot-picker-button:not(.is-recording) { color: var(--session-color, var(--glass-accent-strong)); }
 .composer-footer .bot-picker-button:not(.is-recording) { background: rgba(var(--pane-tint), .09); }
-.composer-leading-tools .bot-selector-trigger { background:transparent; }
 .composer-footer .model-trigger:hover, .composer-footer .effort-trigger:hover,
 .composer-footer .model-trigger[aria-expanded="true"], .composer-footer .effort-trigger[aria-expanded="true"],
 .composer-footer .context-controls .context-trigger:hover, .composer-footer .context-controls .context-trigger[aria-expanded="true"],
@@ -263,7 +262,7 @@ dialog::backdrop,
 }
 .room-view .send-button:hover { color: var(--session-on-accent); background: var(--session-accent); filter:brightness(.94); }
 .composer-picker, .context-popover, .quick-model-picker, .model-browser,
-.model-change-dialog, .bot-picker, .session-edit-dialog {
+.model-change-dialog, .session-edit-dialog {
   background: linear-gradient(rgba(var(--pane-tint), .035), rgba(var(--pane-tint), .035)), var(--glass-panel);
   border-color: var(--glass-edge);
 }
@@ -275,8 +274,7 @@ dialog::backdrop,
 }
 .composer-picker .picker-check, .model-card small, .model-change-name { color: var(--session-color, var(--glass-accent-strong)); }
 .composer-picker .picker-option:hover, .composer-picker .picker-option:focus-visible,
-.quick-model-option:hover, .quick-model-option:focus-visible, .bot-option:hover { background: rgba(var(--pane-tint), .10); }
-.bot-option input { accent-color: var(--session-color, var(--glass-accent-strong)); }
+.quick-model-option:hover, .quick-model-option:focus-visible { background: rgba(var(--pane-tint), .10); }
 .model-card[aria-pressed="true"] { background: rgba(var(--pane-tint), .10); border-color: var(--session-color, var(--glass-accent-strong)); }
 .session-edit-dialog input[type="text"], .session-color-details input {
   color: var(--text); background: rgba(255, 255, 255, .60); border-color: rgba(var(--pane-tint), .24);
@@ -495,7 +493,7 @@ dialog::backdrop,
   :root { --sidebar: #f5f6fa; --glass-panel: #fafbff; --surface: #fff; --glass-reflection: none; }
   .topbar, .composer, .auth-panel, .sidebar { background: #fafbff; }
   .room-view .composer, .composer-picker, .context-popover, .quick-model-picker,
-  .model-browser, .model-change-dialog, .bot-picker, .session-edit-dialog {
+  .model-browser, .model-change-dialog, .session-edit-dialog {
     background: linear-gradient(rgba(var(--pane-tint), .07), rgba(var(--pane-tint), .07)), #fafbff;
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }
@@ -514,7 +512,7 @@ dialog::backdrop,
   body { background: var(--bg); }
   .topbar, .composer, .auth-panel, .sidebar { background: #fafbff; }
   .room-view .composer, .composer-picker, .context-popover, .quick-model-picker,
-  .model-browser, .model-change-dialog, .bot-picker, .session-edit-dialog {
+  .model-browser, .model-change-dialog, .session-edit-dialog {
     background: linear-gradient(rgba(var(--pane-tint), .07), rgba(var(--pane-tint), .07)), #fafbff;
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }

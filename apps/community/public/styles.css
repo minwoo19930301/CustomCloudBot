@@ -712,59 +712,8 @@ button {
   font-size: 10px;
   line-height: 14px;
 }
-#bot-picker-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 #usage-label {
   white-space: nowrap;
-}
-.bot-picker {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 8px);
-  width: min(320px, calc(100vw - 32px));
-  padding: 6px;
-  border: 1px solid #3a3a3a;
-  border-radius: 12px;
-  background: #181818;
-  box-shadow: 0 8px 24px #0006;
-  z-index: 4;
-}
-.bot-option {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px;
-  border-radius: 7px;
-  cursor: pointer;
-}
-.bot-option:hover {
-  background: var(--hover);
-}
-.bot-option input {
-  accent-color: #ccc;
-  margin: 0;
-}
-.bot-option span {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-.bot-option strong {
-  font-size: 13px;
-  font-weight: 500;
-}
-.bot-option small {
-  font-size: 11px;
-  color: var(--muted);
-  line-height: 16px;
-}
-.picker-note {
-  display: block;
-  padding: 12px;
-  color: var(--muted);
 }
 .sending-status {
   height: 0;
@@ -1294,7 +1243,6 @@ button:active:not(:disabled) { filter:brightness(.9); }
 .agent-workspaces .icon {width:16px;height:16px;flex-shrink:0}
 .avatar-bot {width:30px;height:30px;border-radius:9px;background:#ffffff06;color:#b9c5d7}
 .avatar-bot .icon {width:20px;height:20px}
-.bot-option > .icon {width:22px;height:22px;margin-right:8px}
 .agent-working .avatar-bot .icon { animation: icon-write 1.4s ease-in-out infinite; }
 .icon-button:hover .icon,
 .room-item:hover .room-icon .icon,
@@ -1618,13 +1566,6 @@ button:active .agent-art { transform:scale(.94); }
 .composer-tools .demo-badge { display:none; }
 .composer-row textarea { flex:1 1 auto; width:0; min-width:0; padding:7px 7px 3px; min-height:34px; }
 .composer-footer { display:flex; flex-wrap:nowrap; align-items:center; justify-content:flex-start; gap:6px; padding:0 2px 1px; min-width:0; }
-.composer-leading-tools { position:relative; display:flex; align-items:center; flex:0 1 auto; min-width:0; max-width:150px; }
-.composer-leading-tools .bot-selector-trigger { display:flex; align-items:center; gap:5px; width:auto; height:32px; min-width:0; max-width:100%; padding:6px 8px; border-radius:9px; font:inherit; font-size:12px; }
-.bot-selector-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.bot-selector-trigger svg { width:14px; height:14px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; }
-.composer-leading-tools .bot-picker { left:0; bottom:calc(100% + 8px); max-height:min(360px,55dvh); overflow-y:auto; overscroll-behavior:contain; }
-.bot-picker.is-floating { position:fixed; inset:auto; z-index:310; margin:0; box-sizing:border-box; width:min(320px,calc(100vw - 24px)); max-height:min(360px,calc(100dvh - 24px)); overflow-y:auto; overscroll-behavior:contain; }
-.bot-picker.is-floating::backdrop { background:transparent; }
 .composer-footer .model-controls { display:flex; align-items:center; justify-content:flex-end; flex:1 1 auto; flex-wrap:nowrap!important; gap:5px; padding:0; min-width:0; margin:0; }
 .composer-footer .model-controls label { display:flex; align-items:center; min-width:0; gap:0; }
 .composer-footer .model-controls > label:first-child { flex:0 1 auto; max-width:260px; }
@@ -1696,8 +1637,7 @@ button:active .agent-art { transform:scale(.94); }
 @container (max-width:430px) {
   .composer-footer { gap:4px; padding:0; }
   .composer-footer > .bot-picker-button,.composer-footer > .send-button { width:28px; height:28px; }
-  .composer-leading-tools { max-width:94px; flex-shrink:1.4; }
-  .composer-leading-tools .bot-selector-trigger,.composer-footer .model-trigger,.composer-footer .effort-trigger { font-size:11px; padding:5px 4px; gap:3px; }
+  .composer-footer .model-trigger,.composer-footer .effort-trigger { font-size:11px; padding:5px 4px; gap:3px; }
   .composer-footer .model-controls { gap:2px; }
   .composer-footer .model-controls > label:first-child { max-width:120px; }
   .composer-footer .effort-trigger span { display:none; }
@@ -1708,8 +1648,7 @@ button:active .agent-art { transform:scale(.94); }
 }
 @container (max-width:320px) {
   .composer-footer { gap:3px; }
-  .composer-leading-tools { max-width:72px; }
-  .composer-footer .bot-selector-trigger svg,.composer-footer .model-trigger svg,.composer-footer .effort-trigger svg { width:10px; height:10px; }
+  .composer-footer .model-trigger svg,.composer-footer .effort-trigger svg { width:10px; height:10px; }
   .composer-footer .context-label { display:none; }
 }
 @media(prefers-reduced-motion:reduce) { .composer-picker { animation:none; } }
