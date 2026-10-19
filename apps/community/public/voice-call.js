@@ -35,6 +35,7 @@ export function createVoiceCall({api, getSession, getRoom, getSelection, onMessa
   }
   const current = call => {
     if (active !== call || call.controller.signal.aborted) return false;
+    if (getRoom(call.roomId)?.readOnly) { end("가지치기한 원본입니다. 새 가지에서 통화해 주세요."); return false; }
     if (getSession()?.user?.id !== call.userId) { end("로그인이 바뀌어 통화를 종료했어요."); return false; }
     return true;
   };
@@ -225,6 +226,7 @@ export function createVoiceCall({api, getSession, getRoom, getSelection, onMessa
   }
   async function start() {
     if (active || !target || !getSession()?.user) return;
+    if (getRoom(target.id)?.readOnly) { startButton.hidden = true; renderStage("ended", "가지치기한 원본입니다. 새 가지에서 통화해 주세요."); return; }
     const usesNativeAudio = nativeAudio();
     if (!usesNativeAudio && (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext) || !window.speechSynthesis)) {
       startButton.hidden = false;
@@ -253,6 +255,7 @@ export function createVoiceCall({api, getSession, getRoom, getSelection, onMessa
       const [capability, data] = await Promise.all([api("/api/voice", {signal:requestSignal(call)}), api(`/api/rooms/${call.roomId}`, {signal:requestSignal(call)})]);
       if (!current(call)) return;
       if (!capability.configured) throw new Error("음성 인식 연결이 필요해요. 내 봇 설정에서 Groq 키를 확인해 주세요.");
+      if (data.room?.readOnly) throw new Error("가지치기한 원본입니다. 새 가지에서 통화해 주세요.");
       if (data.busy) throw new Error("이 대화의 작업이 끝나면 통화를 시작해 주세요.");
       call.maxSeconds = Math.min(30, Number(capability.maxSeconds) || 30); call.maxBytes = Math.min(10 * 1024 * 1024, Number(capability.maxBytes) || 10 * 1024 * 1024);
       refreshTitle(call, data.room?.name);
@@ -278,6 +281,7 @@ export function createVoiceCall({api, getSession, getRoom, getSelection, onMessa
     if (active) { show(); if (room?.id !== active.roomId) toast(`현재 통화는 ‘${active.title}’에 연결되어 있어요.`); return; }
     if (!getSession()?.user) { toast("로그인한 뒤 통화를 시작해 주세요."); return; }
     if (!room || room.archived || room.id === "00000000-0000-4000-8000-000000000001") { toast("전화할 대화를 먼저 선택해 주세요."); return; }
+    if (room.readOnly || getRoom(room.id)?.readOnly) { toast("가지치기한 원본입니다. 새 가지에서 통화해 주세요."); return; }
     target = {id:room.id, name:room.name}; title.textContent = room.name; transcript.textContent = ""; find(".voice-call-time").textContent = "";
     startButton.hidden = startImmediately; startButton.textContent = "통화 연결";
     renderStage("ready", startImmediately ? "통화를 연결하고 있어요" : "눌러서 이 대화에 연결하세요"); show();
@@ -309,6 +313,11 @@ export function createVoiceCall({api, getSession, getRoom, getSelection, onMessa
     if (nativeAudio() && detail?.action === "state") {
       if (!getSession()?.user) return;
       if (detail.userId && detail.userId !== getSession().user.id) return;
+      if (getRoom(detail.roomId)?.readOnly) {
+        nativeBridge()?.postMessage({action:"end", roomId:detail.roomId});
+        if (active?.roomId === detail.roomId) end("가지치기한 원본입니다. 새 가지에서 통화해 주세요.", false);
+        return;
+      }
       if (!detail.roomId) { if (active?.nativeAudio) end("통화가 끝났어요.", false); return; }
       if (active && (active.roomId !== detail.roomId || !current(active))) return;
       if (!active) {
@@ -343,6 +352,7 @@ export function createVoiceCall({api, getSession, getRoom, getSelection, onMessa
   return {open, syncSession:() => { if (nativeAudio() && getSession()?.user) nativeBridge().postMessage({action:"session"}); },
     reset:() => { if (nativeAudio()) nativeBridge().postMessage({action:"logout"}); end(); dialog.close(); target = null; transcript.textContent = ""; },
     get roomId() { return active?.roomId || null; }, handleLink() {
+    if (active && !current(active)) return;
     if (nativeAudio() && getSession()?.user) nativeBridge().postMessage({action:"status"});
     const url = new URL(location.href);
     if (url.searchParams.get("call") !== "1" || !getSession()?.user) return;

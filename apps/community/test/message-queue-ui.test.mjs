@@ -87,7 +87,7 @@ function setupSubmit({paneMode=false,busy=true,response}={}) {
     api:async(path,options)=>{calls.push({path,options});return response?response():{accepted:true,queued:true,queueId:'queue-1'};},
     applyModels(){},clearPendingAttachments(){state.pendingAttachments=[];},refreshRoom:async()=>{},refreshExtra:async()=>{},loadRooms:async()=>{},paintPending:roomId=>paints.push(roomId),toast:text=>toasts.push(text),clearThinking(){},els:{sendingStatus:{}},
   };
-  vm.runInNewContext(functionSource('function recordingBlocksSend(', 'function syncRecordingButtons(')+functionSource('async function submitMessage(', 'async function authSubmit(')+functionSource('function composerBlocked(', 'function updateModelAvailability(')+functionSource('async function submitPane(', 'async function refreshExtra(')+'\nthis.submit=()=>'+(paneMode?'submitPane({preventDefault(){},currentTarget:{}},0,true)':'submitMessage({preventDefault(){}},true)')+';',context);
+  vm.runInNewContext(functionSource('function roomReadOnly(', 'function clearPendingAttachments(')+functionSource('function recordingBlocksSend(', 'function syncRecordingButtons(')+functionSource('async function submitMessage(', 'async function authSubmit(')+functionSource('function composerBlocked(', 'function updateModelAvailability(')+functionSource('async function submitPane(', 'async function refreshExtra(')+'\nthis.submit=()=>'+(paneMode?'submitPane({preventDefault(){},currentTarget:{}},0,true)':'submitMessage({preventDefault(){}},true)')+';',context);
   return {state,pane,input,calls,optimistic,paints,toasts,pendingMessages,submit:context.submit};
 }
 

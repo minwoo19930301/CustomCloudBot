@@ -6,9 +6,9 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {startCommunity} from "../server.mjs";
 
-async function fixture(t, complete) {
+async function fixture(t, complete, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), "fork-branches-")), calls = [];
-  const app = await startCommunity({dataDir: dir, port: 0, env: {COMMUNITY_BOOTSTRAP_TOKEN: "bootstrap"}, llm: {
+  const app = await startCommunity({dataDir: dir, port: 0, env: {COMMUNITY_BOOTSTRAP_TOKEN: "bootstrap"}, ...options, llm: {
     complete: async request => {calls.push(request); return complete ? complete(request) : 'SendMessage: {"content":"새 가지의 여행 계획"}';},
   }});
   t.after(async () => {await app.close(); await rm(dir, {recursive: true, force: true});});
@@ -36,7 +36,7 @@ async function fixture(t, complete) {
   return {app, db: app.db, calls, call, register, room, send, split, read, upload};
 }
 
-test("splitting a message creates two siblings, then adds one at that point while preserving the parent", async t => {
+test("every split creates two siblings while preserving the read-only parent's history", async t => {
   const f = await fixture(t), owner = await f.register("split_owner"), id = await f.room(owner);
   const first = await f.send(owner, id, "FIRST_POINT"), second = await f.send(owner, id, "LATER_POINT");
   const before = await f.read(owner, id), firstSplit = await f.split(owner, id, {throughMessageId: first});
@@ -52,20 +52,21 @@ test("splitting a message creates two siblings, then adds one at that point whil
     assert.equal(data.members.length, 1);
   }
   const additional = await f.split(owner, id, {throughMessageId: first});
-  assert.equal(additional.initialSplit, false); assert.equal(additional.createdRooms.length, 1);
-  assert.equal(additional.room.name, "원본 계획 · 가지 3");
+  assert.equal(additional.initialSplit, true); assert.equal(additional.createdRooms.length, 2);
+  assert.deepEqual(additional.createdRooms.map(room => room.name), ["원본 계획 · 가지 3", "원본 계획 · 가지 4"]);
   const latest = await f.split(owner, id);
   assert.equal(latest.createdRooms.length, 2);
   assert.equal(latest.branchPoint.throughMessageId, second);
-  assert.equal((await f.split(owner, id, {throughMessageId: second})).createdRooms.length, 1, "explicit and omitted latest cutoff refer to the same point");
+  assert.equal((await f.split(owner, id, {throughMessageId: second})).createdRooms.length, 2, "a repeated cutoff still creates two new children");
   const after = await f.read(owner, id);
   assert.ok(after.room.lastTouchedAt >= before.room.lastTouchedAt);
-  assert.deepEqual({...after, room: {...after.room, lastTouchedAt: before.room.lastTouchedAt}}, before);
+  assert.equal(after.room.readOnly, true); assert.equal(after.room.readOnlyReason, "forked");
+  assert.deepEqual({...after, room: {...after.room, lastTouchedAt: before.room.lastTouchedAt, readOnly: false, readOnlyReason: null}}, before);
   const list = (await f.call("/api/rooms", owner)).data;
   const links = list.forks.filter(link => link.parent === id);
-  assert.equal(links.length, 6);
-  assert.deepEqual(links.map(link => link.branchIndex).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6]);
-  assert.equal(links.filter(link => link.throughMessageId === first).length, 3);
+  assert.equal(links.length, 8);
+  assert.deepEqual(links.map(link => link.branchIndex).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(links.filter(link => link.throughMessageId === first).length, 4);
   const nested = await f.split(owner, firstSplit.room.id);
   assert.equal(nested.createdRooms.length, 2);
   const nestedLinks = (await f.call("/api/rooms", owner)).data.forks.filter(link => nested.createdRooms.some(room => room.id === link.id));
@@ -103,18 +104,18 @@ test("historical splits copy only selected history and attachments; current spli
   assert.equal((await f.read(owner, id)).messages.length, 2);
 });
 
-test("an existing legacy tail fork counts only at its inherited cutoff and legacy callers still create one child", async t => {
+test("legacy callers still create one writable child while explicit splits always create two", async t => {
   const f = await fixture(t), owner = await f.register("legacy_owner"), id = await f.room(owner);
   const point = await f.send(owner, id, "OLD_TIP");
   const legacy = await f.call(`/api/rooms/${id}/fork`, owner, {});
   assert.equal(legacy.status, 201); assert.deepEqual(Object.keys(legacy.data), ["room"]);
   await f.send(owner, legacy.data.room.id, "CHILD_ONLY");
-  assert.equal((await f.split(owner, id, {throughMessageId: point})).createdRooms.length, 1);
   await f.send(owner, id, "NEW_TIP");
+  assert.equal((await f.split(owner, id, {throughMessageId: point})).createdRooms.length, 2);
   assert.equal((await f.split(owner, id)).createdRooms.length, 2);
   const empty = await f.room(owner);
   assert.equal((await f.split(owner, empty)).createdRooms.length, 2);
-  assert.equal((await f.split(owner, empty)).createdRooms.length, 1);
+  assert.equal((await f.split(owner, empty)).createdRooms.length, 2);
 });
 
 test("split counts and membership do not reveal another participant's private forks", async t => {
@@ -152,6 +153,7 @@ test("creating two children is atomic when only one room slot remains", async t 
   const before = counts();
   assert.equal((await f.call(`/api/rooms/${id}/fork`, owner, {branching: true})).status, 409);
   assert.deepEqual(counts(), before, "failed split cannot leave the first room or any copied rows behind");
+  assert.equal((await f.read(owner, id)).room.readOnly, false, "failed split must not lock its source");
   assert.equal((await f.read(owner, id)).messages[0].text, "KEEP_PARENT");
   assert.equal((await f.call(`/api/rooms/${id}/fork`, owner, {})).status, 201, "single-child legacy API still fits in the remaining slot");
 });
@@ -193,4 +195,75 @@ test("fork and merge refresh their source activity before the next list can auto
     assert.ok(listed.lastTouchedAt >= beforeMerge);
     assert.deepEqual((await f.read(owner, id)).messages, originals[index].messages);
   }
+});
+
+test("forked sources reject chat, queued chat, uploads, voice and context changes while children stay writable", async t => {
+  const f = await fixture(t), owner = await f.register("readonly_owner"), id = await f.room(owner);
+  await f.send(owner, id, "KEEP_THIS_HISTORY", {clientNonce:"original"});
+  const original = (await f.read(owner, id)).messages, split = await f.split(owner, id);
+  assert.equal(split.sourceRoom.readOnly, true); assert.equal(split.sourceRoom.readOnlyReason, "forked");
+  assert.ok(split.createdRooms.every(room => room.readOnly === false && room.readOnlyReason === null));
+  for (const [path, body] of [
+    ["messages", {text:"NO_NEW_CHAT",clientNonce:"blocked",botIds:[]}],
+    ["messages", {text:"NO_NEW_QUEUE",clientNonce:"queued",botIds:["bot-analyst"],queueIfBusy:true}],
+    ["messages", {text:"model",clientNonce:"models",botIds:[]}],
+    ["attachments", {}], ["voice/transcribe", {}], ["compact", {}], ["context-reset", {}],
+  ]) {
+    const result = await f.call(`/api/rooms/${id}/${path}`, owner, body);
+    assert.equal(result.status, 409, path); assert.equal(result.data.code, "ROOM_READ_ONLY", path);
+  }
+  assert.equal((await f.call(`/api/rooms/${id}/messages`, owner, {text:"KEEP_THIS_HISTORY",clientNonce:"original",botIds:[]})).status, 202, "an accepted message retry remains idempotent");
+  assert.deepEqual((await f.read(owner, id)).messages, original);
+  const listed = (await f.call("/api/rooms", owner)).data.rooms;
+  assert.equal(listed.find(room => room.id === id).readOnly, true);
+  await f.send(owner, split.room.id, "CHILD_CONTINUES");
+  assert.equal((await f.split(owner, id)).createdRooms.length, 2, "read-only source can be forked repeatedly");
+  const merged = await f.call(`/api/rooms/${id}/merge`, owner, {sourceId: split.room.id});
+  assert.equal(merged.status, 201); assert.equal(merged.data.room.readOnly, false);
+});
+
+test("member forks lock only their actor and pause only that actor's routines; owner forks lock the shared source", async t => {
+  const f = await fixture(t), owner = await f.register("readonly_shared_owner"), member = await f.register("readonly_shared_member", owner), id = await f.room(owner);
+  const token = (await f.call(`/api/rooms/${id}/invites`, owner, {})).data.token;
+  assert.equal((await f.call("/api/rooms/join", member, {token})).status, 200);
+  const createRoutine = async actor => {
+    const result = await f.call(`/api/rooms/${id}/routines`, actor, {title:"Daily work",prompt:"Continue this session",enabled:true,schedule:{type:"daily",time:"09:00",timezone:"UTC"}});
+    assert.equal(result.status, 201); return result.data.routine;
+  };
+  const ownerRoutine = await createRoutine(owner), memberRoutine = await createRoutine(member);
+  const split = await f.split(member, id);
+  assert.equal(split.pausedRoutineCount, 1);
+  assert.equal((await f.read(member, id)).room.readOnly, true);
+  assert.equal((await f.read(owner, id)).room.readOnly, false);
+  const routineRow = routine => f.db.prepare("SELECT enabled,next_run_at,deleted_at FROM routines WHERE id=?").get(routine.id);
+  assert.equal(routineRow(memberRoutine).enabled, 0); assert.equal(routineRow(memberRoutine).next_run_at, null);
+  assert.equal(routineRow(ownerRoutine).enabled, 1);
+  assert.equal((await f.call(`/api/rooms/${id}/routines`, member)).status, 200, "paused routine history remains readable");
+  const blockedRun = await f.call(`/api/routines/${memberRoutine.id}/run`, member, {requestId:"readonly"});
+  assert.equal(blockedRun.status, 409); assert.equal(blockedRun.data.code, "ROOM_READ_ONLY");
+  const blockedChat = await f.call(`/api/rooms/${id}/messages`, member, {text:"NO_MEMBER_CHAT",clientNonce:"member",botIds:[]});
+  assert.equal(blockedChat.data.code, "ROOM_READ_ONLY");
+  await f.send(owner, id, "OWNER_CAN_CONTINUE");
+  const ownerSplit = await f.split(owner, id);
+  assert.equal(ownerSplit.pausedRoutineCount, 1);
+  assert.equal(routineRow(ownerRoutine).enabled, 0); assert.equal(routineRow(ownerRoutine).deleted_at, null);
+  assert.equal((await f.read(owner, id)).room.readOnly, true);
+  assert.equal((await f.read(member, id)).room.readOnly, true);
+  assert.equal((await f.read(member, split.room.id)).room.readOnly, false);
+});
+
+test("a source locked during awaited model discovery cannot accept a late message", async t => {
+  const discovery = Promise.withResolvers(), entered = Promise.withResolvers();
+  const f = await fixture(t, undefined, {providerPool:{configured:false,providers:[],choose:()=>null,
+    ensureModels:async()=>{entered.resolve();await discovery.promise;}}});
+  const owner = await f.register("readonly_race_owner"), id = await f.room(owner);
+  const pending = f.call(`/api/rooms/${id}/messages`, owner, {text:"LATE_MESSAGE",clientNonce:"race",botIds:["bot-analyst"]});
+  await entered.promise;
+  try {
+    await f.split(owner, id);
+  } finally {discovery.resolve();}
+  const result = await pending;
+  assert.equal(result.status, 409); assert.equal(result.data.code, "ROOM_READ_ONLY");
+  assert.equal((await f.read(owner, id)).messages.length, 0);
+  assert.equal(f.calls.length, 0);
 });

@@ -14,7 +14,7 @@ import { createInviteLink, createInviteLinks } from "/invite-links.mjs";
 import { createProfileSettings } from "/profile-settings.js";
 import { createRoomSharing } from "/room-sharing.js";
 import { mergePendingMessages, failedOutcome } from "/conversation-ui.mjs";
-import { layoutBranches, branchGraphGeometry, branchDisplayName } from "/branch-graph.mjs";
+import { layoutBranches, branchGraphGeometry, branchDisplayName, branchFocus, branchEdgeKey } from "/branch-graph.mjs";
 import { sessionColors } from "/session-colors.js";
 import { createSessionColorPicker, rgbToHex } from "/session-color-picker.mjs";
 import { createRoutineUI } from "/routines.js";
@@ -117,6 +117,7 @@ const api = async (path, options = {}, retry = 0) => {
   if (!response.ok) {
     const error = new Error(payload.error || "요청을 처리하지 못했습니다.");
     error.status = response.status;
+    error.code = payload.code;
     throw error;
   }
   return payload;
@@ -369,6 +370,7 @@ async function loadRooms() {
     els.usage.textContent = "";
     els.usage.title = data.usage ? `앱의 하루 호출 사용량 ${data.usage.used} / ${data.usage.limit}회 · 공급자 잔여량과 별개` : "";
     renderRooms();
+    updateModelAvailability();
     const activeRooms = state.rooms.filter(room => !room.archived && room.id !== MONITOR_ROOM);
     if (!state.rooms.some(room => room.id === state.selectedRoom && !room.archived)) {
       if (!activeRooms.length) { showEmpty(); return; }
@@ -383,6 +385,7 @@ async function loadRooms() {
   }
 }
 let showDeletedRooms=false;
+let sidebarBranchFocus=null;
 let sessionSearch="";
 let sidebarState={userId:null,groups:[],roomOrder:[],width:280,loaded:false};
 let sidebarConfirmed={groups:[],roomOrder:[],width:280};
@@ -401,7 +404,7 @@ function applySidebarWidth() {
   handle.setAttribute("aria-disabled",String(!sidebarState.loaded));
 }
 function resetSidebarState(userId=null) {
-  sidebarEpoch+=1;sidebarRevision=0;showDeletedRooms=false;sessionSearch="";
+  sidebarEpoch+=1;sidebarRevision=0;showDeletedRooms=false;sidebarBranchFocus=null;sessionSearch="";
   $("#session-search").value="";$("#sidebar-search-wrap").hidden=true;$("#sidebar-search-toggle").setAttribute("aria-expanded","false");
   clearTimeout(sidebarWidthTimer);sidebarWidthTimer=null;sidebarPreviewWidth=null;
   sidebarState={userId,groups:[],roomOrder:[],width:280,loaded:false};sidebarConfirmed={groups:[],roomOrder:[],width:280};
@@ -687,20 +690,46 @@ function syncSessionColors(colors = sessionColors(state.rooms, state.forks)) {
   paintSession($("#branch-current"), colors.get(currentBranchId()));
   paintSession($(".topbar"),colors.get(state.selectedRoom));
 }
+function focusSidebarBranch(roomId) {
+  sidebarBranchFocus=roomId || null;
+  const graphList=$(".branch-graph",els.roomList);if(!graphList)return;
+  const graph=layoutBranches(state.rooms.filter(room=>room.id!==MONITOR_ROOM),state.forks,{order:sidebarState.roomOrder,query:sessionSearch});
+  const flow=branchFocus(graph,sidebarBranchFocus);
+  graphList.classList.toggle("has-branch-focus",!!flow);
+  for(const row of $$(".branch-row",graphList)) {
+    row.classList.toggle("is-flow-focused",!!flow?.roomIds.has(row.dataset.roomId));
+    row.classList.toggle("is-flow-muted",!!flow&&!flow.roomIds.has(row.dataset.roomId));
+  }
+  for(const path of $$(".branch-path",graphList)) {
+    const active=!!flow?.edgeKeys.has(branchEdgeKey(path.dataset.branchFrom,path.dataset.branchTo));
+    path.classList.toggle("is-flow-focused",active);path.classList.toggle("is-flow-muted",!!flow&&!active);
+  }
+  for(const hit of $$(".branch-path-hit",graphList)) hit.setAttribute("aria-pressed",String(sidebarBranchFocus===hit.dataset.roomId));
+}
 function renderRooms() {
-  const focus = els.roomList.contains(document.activeElement) ? {roomId: document.activeElement.dataset.roomId, action: document.activeElement.dataset.branchAction} : null;
+  const focus = els.roomList.contains(document.activeElement) ? {roomId: document.activeElement.dataset.roomId, action: document.activeElement.dataset.branchAction, from:document.activeElement.dataset.branchFrom} : null;
   renderAccountTools(); els.roomList.replaceChildren(); updateBranchControls(); syncSessionActions();
+  els.roomList.onclick=event=>{if(event.target===els.roomList)focusSidebarBranch(null);};
+  els.roomList.onkeydown=event=>{if(event.key==="Escape"){event.stopPropagation();focusSidebarBranch(null);}};
   const colors = sessionColors(state.rooms, state.forks);
   const openIds = sidebarOpenRoomIds(), focusedId = currentBranchId();
   const graph = layoutBranches(state.rooms.filter(room => room.id !== MONITOR_ROOM), state.forks, {order:sidebarState.roomOrder,query:sessionSearch});
   const graphList = document.createElement("div"); graphList.className = "branch-graph";
   const geometry = branchGraphGeometry(graph);
   graphList.style.setProperty("--branch-rail", (geometry.paths.length ? geometry.width : 12) + "px");
-  const svg = branchSvg("svg", {class:"branch-lines", width:geometry.width, height:geometry.height, "aria-hidden":"true"});
+  const svg = branchSvg("svg", {class:"branch-lines", width:geometry.width, height:geometry.height, role:"group", "aria-label":"대화 연결선"});
   const byId = new Map(graph.rows.map(row => [row.id,row]));
   for (const edge of geometry.paths) {
-    svg.append(branchSvg("path", {d:edge.d, style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`, class:`branch-path${edge.secondary ? " is-merge" : ""}${edge.from===currentBranchId()||edge.to===currentBranchId()?" is-current":""}`}));
+    svg.append(branchSvg("path", {d:edge.d, "data-branch-from":edge.from, "data-branch-to":edge.to, "aria-hidden":"true", style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`, class:`branch-path${edge.secondary ? " is-merge" : ""}${edge.from===currentBranchId()||edge.to===currentBranchId()?" is-current":""}`}));
   }
+  for (const edge of geometry.paths) {
+    const hit=branchSvg("path",{d:edge.d,class:"branch-path-hit",style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`,role:"button",tabindex:0,"data-room-id":edge.to,"data-branch-from":edge.from,"data-branch-action":"focus-flow","aria-label":`${byId.get(edge.from)?.room.name}에서 ${byId.get(edge.to)?.room.name}로 이어지는 흐름 강조`,"aria-pressed":"false"});
+    hit.onclick=event=>{event.stopPropagation();focusSidebarBranch(sidebarBranchFocus===edge.to?null:edge.to);};
+    hit.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();event.stopPropagation();focusSidebarBranch(sidebarBranchFocus===edge.to?null:edge.to);}};
+    svg.append(hit);
+  }
+  graphList.onclick=event=>{if(event.target===graphList||event.target===svg)focusSidebarBranch(null);};
+  graphList.onkeydown=event=>{if(event.key==="Escape"){event.stopPropagation();focusSidebarBranch(null);}};
   for (const row of graph.rows) {
     const open = openIds.has(row.id), active = open && focusedId === row.id;
     const button = document.createElement("button"); button.type="button"; button.className="branch-row"; button.dataset.roomId=row.id; button.dataset.dockRoom=row.id;
@@ -719,7 +748,7 @@ function renderRooms() {
     copy.append(name,meta); button.append(copy);
     const grip=document.createElement("span");grip.className="session-drag-handle";grip.setAttribute("aria-hidden","true");grip.title="잡고 이동";grip.innerHTML='<svg viewBox="0 0 24 24"><path d="M8 5v14m8-14v14M5 8l3-3 3 3m2 8 3 3 3-3"/></svg>';button.append(grip);
     paintSession(button, colors.get(row.id));
-    button.onclick=event=>{if(event.target.closest(".session-drag-handle"))return;if(state.focusPane>0)assignExtra(state.focusPane-1,row.id);else void selectRoom(row.id);closeSidebar();};
+    button.onclick=event=>{if(event.target.closest(".session-drag-handle"))return;focusSidebarBranch(row.id);if(state.focusPane>0)assignExtra(state.focusPane-1,row.id);else void selectRoom(row.id);closeSidebar();};
     graphList.append(button);
   }
   graphList.prepend(svg); els.roomList.append(graphList);
@@ -741,9 +770,10 @@ function renderRooms() {
     }
     section.append(list);els.roomList.append(section);
   }
+  focusSidebarBranch(sidebarBranchFocus);
   syncSessionColors(colors);
   syncSessionActivity();
-  if(focus){const target=$$("button",els.roomList).find(button=>button.dataset.roomId===focus.roomId&&button.dataset.branchAction===focus.action);target?.focus({preventScroll:true});}
+  if(focus){const target=$$(focus.action==="focus-flow"?".branch-path-hit":"button",els.roomList).find(button=>button.dataset.roomId===focus.roomId&&button.dataset.branchAction===focus.action&&button.dataset.branchFrom===focus.from);target?.focus({preventScroll:true});}
 }
 function openArchivedConversations() {
   showDeletedRooms=true;renderRooms();
@@ -784,6 +814,7 @@ async function selectRoom(id) {
     if (pane.roomId === id) { clearAttachmentDraft(pane); pane.roomId = previous && previous !== id ? previous : null; }
   });
   state.selectedRoom = id;
+  focusSidebarBranch(id);
   $("#message-input").disabled=state.sending;
   notificationUI?.markRoomRead(id);
   clearThinking(els.sendingStatus);
@@ -1278,8 +1309,9 @@ function createMessage(message, pane = null, roomId = state.selectedRoom, { anim
   }
   if (message.pending === "failed") {
     const failure = document.createElement("div"); failure.className = "message-send-error";
-    const note = document.createElement("span"); note.textContent = "전송을 확인하지 못했어요.";
+    const note = document.createElement("span"); note.textContent = message.readOnly ? "원본이 읽기 전용으로 바뀌어 보내지 않았어요. 내용을 복사해 새 가지에서 이어가세요." : "전송을 확인하지 못했어요.";
     const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "다시 보내기";
+    retry.dataset.retryRoomId = roomId; retry.disabled = !!message.readOnly || roomReadOnly(roomId);
     retry.onclick = () => retryPendingMessage(message);
     const discard = document.createElement("button"); discard.type = "button"; discard.textContent = "삭제";
     discard.setAttribute("aria-label", "보내지 못한 메시지 삭제");
@@ -1291,7 +1323,7 @@ function createMessage(message, pane = null, roomId = state.selectedRoom, { anim
 }
 async function retryPendingMessage(message) {
   const request = message.retry;
-  if (!request || message.pending !== "failed" || message.retrying ||
+  if (!request || message.pending !== "failed" || message.retrying || message.readOnly || roomReadOnly(request.roomId) ||
       state.session?.user?.id !== request.userId || pendingMessages.get(request.roomId) !== message) return;
   const { roomId, userId, payload } = request;
   const retrySession = state.session;
@@ -1317,7 +1349,10 @@ async function retryPendingMessage(message) {
   } catch (error) {
     if (!current()) return;
     if (accepted) { toast("메시지는 접수됐습니다. 대화를 다시 불러오고 있어요."); return; }
-    message.pending = "failed"; presenceErrors.add(roomId); toast(error.message);
+    message.pending = "failed";
+    if (error.code === "ROOM_READ_ONLY") { message.readOnly = true; markRoomReadOnly(roomId); }
+    else presenceErrors.add(roomId);
+    toast(error.message);
   } finally {
     message.retrying = false;
     if (sameSession() && (current() || accepted)) { paintPending(roomId); updateModelAvailability(); }
@@ -1326,6 +1361,33 @@ async function retryPendingMessage(message) {
 function discardPendingMessage(message, roomId) {
   if (message.retrying || message.pending !== "failed" || pendingMessages.get(roomId) !== message) return;
   pendingMessages.delete(roomId); paintPending(roomId);
+}
+function roomReadOnly(roomId) {
+  if (!roomId) return false;
+  return !!(state.rooms?.find(room => room.id === roomId)?.readOnly ||
+    (state.roomData?.room?.id === roomId && state.roomData.room.readOnly) ||
+    state.extra?.some(pane => pane.roomId === roomId && pane.data?.room?.id === roomId && pane.data.room.readOnly));
+}
+function markRoomReadOnly(roomId) {
+  const rooms = [state.rooms?.find(room => room.id === roomId), state.roomData?.room,
+    ...state.extra.map(pane => pane.data?.room)];
+  for (const room of rooms) if (room?.id === roomId) { room.readOnly = true; room.readOnlyReason = "forked"; }
+}
+function recoverReadOnlySend(error, {roomId, pane = null, input, text, attachmentGeneration, pending}) {
+  if (error.code !== "ROOM_READ_ONLY") return false;
+  markRoomReadOnly(roomId);
+  const owner = pane || state;
+  owner.pendingSend = null;
+  if (pending) { pending.pending = "failed"; pending.readOnly = true; }
+  // Only restore into the exact draft that sent this request. A late response
+  // must not overwrite another room's draft or discard its attachments.
+  if (contextOwnerCurrent(roomId, state.session?.user?.id, pane) && owner.attachmentGeneration === attachmentGeneration && !input.value) {
+    input.value = text;
+    if (pane) pane.draft = text;
+    if (pendingMessages.get(roomId) === pending) pendingMessages.delete(roomId);
+  }
+  paintPending(roomId); toast(error.message);
+  return true;
 }
 function clearPendingAttachments(pane = null) {
   clearAttachmentDraft(pane || state);
@@ -1396,13 +1458,14 @@ let composerRecorder;
 function recordingCurrent(context) {
   const owner=context.pane||state;
   return contextOwnerCurrent(context.roomId,context.userId,context.pane) &&
-    context.csrfToken===state.session?.csrfToken && owner.attachmentGeneration===context.attachmentGeneration;
+    context.csrfToken===state.session?.csrfToken && owner.attachmentGeneration===context.attachmentGeneration && !roomReadOnly(context.roomId);
 }
 function recordingBlocksSend(pane=null) {
   if(composerRecorder?.context?.pane!==pane||composerRecorder.status==="idle")return false;
   toast("녹음을 마치거나 취소한 뒤 보내주세요.");return true;
 }
 function syncRecordingButtons() {
+  if (composerRecorder?.status !== "idle" && composerRecorder?.context && roomReadOnly(composerRecorder.context.roomId)) composerRecorder.cancel();
   for(const button of $$(".record-button")) {
     const pane=button._pane||null, active=composerRecorder?.context?.pane===pane && composerRecorder.status!=="idle";
     const status=active?composerRecorder.status:"idle";
@@ -1459,6 +1522,7 @@ async function offerTopicChoice(pane,draft) {
     sourceInput.disabled=true;locked=true;
     const result=await api(choice==="fork"?`/api/rooms/${encodeURIComponent(roomId)}/fork`:"/api/rooms",{method:"POST",body:JSON.stringify(choice==="fork"?{branching:true}:{})});
     if(!current())return true;
+    if(result.pausedRoutineCount)toast("원본은 읽기 전용으로 남기고 루틴을 일시 중지했습니다.");
     saveRoomPreferences(result.room.id,{model,effort});
     await loadRooms();if(!current())return true;
     if(pane){
@@ -1472,7 +1536,7 @@ async function offerTopicChoice(pane,draft) {
     }
     return true;
   }catch(error){if(current())toast(error.message);return true;}
-  finally{topicPrompts.delete(roomId);if(locked&&sourceInput.isConnected&&contextOwnerCurrent(lockedRoomId,userId,pane))sourceInput.disabled=false;}
+  finally{topicPrompts.delete(roomId);if(locked&&sourceInput.isConnected&&contextOwnerCurrent(lockedRoomId,userId,pane))sourceInput.disabled=!!composerBlocked(pane);}
 }
 async function submitMessage(event, skipTopic = false) {
   event.preventDefault();
@@ -1540,6 +1604,7 @@ async function submitMessage(event, skipTopic = false) {
   } catch (error) {
     if(!sendCurrent())return;
     if(accepted){toast("메시지는 접수됐습니다. 대화를 다시 불러오고 있어요.");return;}
+    if (recoverReadOnlySend(error, {roomId, input, text, attachmentGeneration, pending})) return;
     presenceErrors.add(roomId);
     if (pending) {
       pending.pending = "failed";
@@ -1553,7 +1618,7 @@ async function submitMessage(event, skipTopic = false) {
     $("#send-button").disabled = false;
     input.disabled = false;
     if (!state.roomData?.busy) clearThinking(els.sendingStatus);
-    if(state.selectedRoom===roomId)input.focus();
+    if(state.selectedRoom===roomId && !roomReadOnly(roomId))input.focus();
     updateModelAvailability();
   }
 }
@@ -1635,7 +1700,8 @@ function roomContextOwner(pane = null) {
   const roomId=pane?pane.roomId:state.selectedRoom,data=pane?pane.data:state.roomData;
   const working=!!(data?.busy||(pane?pane.sending:state.sending)||pendingMessages.get(roomId)?.retrying);
   const role=data?.room?.role || state.rooms?.find(room=>room.id===roomId)?.role;
-  return {roomId,data,working,busy:working||modelChanges.has(roomId)||branchOperations.has(roomId),canManage:role==="owner"};
+  const readOnly = roomReadOnly(roomId);
+  return {roomId,data,working,readOnly,busy:working||modelChanges.has(roomId)||branchOperations.has(roomId),canManage:role==="owner"&&!readOnly};
 }
 function contextOwnerCurrent(roomId, userId, pane = null) {
   return state.session?.user?.id === userId && (pane ? state.extra.includes(pane) && pane.roomId === roomId : state.selectedRoom === roomId);
@@ -1657,7 +1723,8 @@ async function openBranchResult(data, destination) {
   showDeletedRooms=false;
   if(destination.pane)assignExtra(state.extra.indexOf(destination.pane),data.room.id);else await selectRoom(data.room.id);
   renderRooms();closeSidebar();
-  toast(data.contextTruncated?"맥락이 길어 일부만 이어받았습니다. 원본 가지에서 전체 기록을 볼 수 있어요.":data.createdRooms?.length>1?"원본을 남기고 하위 대화 2개를 만들었습니다.":"새 가지를 만들었습니다. 원본은 그대로 남습니다.");
+  const message=data.contextTruncated?"맥락이 길어 일부만 이어받았습니다. 원본 가지에서 전체 기록을 볼 수 있어요.":data.createdRooms?.length>1?"원본은 읽기 전용으로 남기고 하위 대화 2개를 만들었습니다.":"새 가지를 만들었습니다. 원본은 그대로 남습니다.";
+  toast(message+(data.pausedRoutineCount?" 원본의 루틴은 일시 중지했습니다.":""));
 }
 function mergeBranch(roomId, sourceId = null) {
   const room=state.rooms.find(item=>item.id===roomId&&!item.archived), branches=mergeCandidates(roomId);
@@ -1694,6 +1761,7 @@ function mergeBranch(roomId, sourceId = null) {
 async function sessionAction(action, pane = null, button = null, throughMessageId = null, expectedRoomId = null, explicitRoomId = null) {
   const owner=roomContextOwner(pane),roomId=explicitRoomId||owner.roomId,destination=branchDestination(pane,!!explicitRoomId);
   if(!roomId||roomId===MONITOR_ROOM||branchBusy(roomId)||(expectedRoomId&&expectedRoomId!==roomId)||!state.rooms.some(room=>room.id===roomId&&!room.archived))return;
+  if(action!=="fork" && roomReadOnly(roomId))return;
   if(action==="compact"&&!owner.canManage)return;
   if(button)button.disabled=true;branchOperations.add(roomId);updateModelAvailability();
   try {
@@ -1919,31 +1987,54 @@ function saveRoomPreferences(id, prefs) {
   try { localStorage.setItem("community-model:" + state.session.user.id + ":" + id, JSON.stringify(prefs)); } catch {}
 }
 function composerBlocked(pane = null) {
-  const {roomId} = roomContextOwner(pane);
-  return !roomId || roomId === MONITOR_ROOM || (pane ? pane.sending : state.sending) || pendingMessages.get(roomId)?.retrying || modelChanges.has(roomId) || branchOperations.has(roomId);
+  const {roomId,readOnly} = roomContextOwner(pane);
+  return readOnly || !roomId || roomId === MONITOR_ROOM || (pane ? pane.sending : state.sending) || pendingMessages.get(roomId)?.retrying || modelChanges.has(roomId) || branchOperations.has(roomId);
+}
+function syncReadOnlyComposer(form, pane, owner) {
+  form.classList.toggle("is-readonly", owner.readOnly);
+  let notice = $(".composer-readonly", form);
+  if (!owner.readOnly) { notice?.remove(); return; }
+  if (!notice) {
+    notice = contextElement("div", undefined, "composer-readonly"); notice.setAttribute("role", "status");
+    notice.append(contextElement("span", "가지치기한 원본입니다. 새 가지에서 대화를 이어가세요."));
+    const fork = contextElement("button", "가지치기", "composer-readonly-fork"); fork.type = "button";
+    fork.onclick = () => sessionAction("fork", pane, fork);
+    notice.append(fork); form.prepend(notice);
+  }
+  $("button", notice).disabled = owner.busy;
 }
 function updateModelAvailability() {
   syncRecordingButtons();
   updateBranchControls();
   syncSessionActivity();
   updateAgentPresence();
+  for (const button of $$("[data-retry-room-id]")) button.disabled = roomReadOnly(button.dataset.retryRoomId);
+  for (const button of $$(".voice-call-button")) {
+    const pane = button._pane || null, roomId = pane ? pane.roomId : state.selectedRoom;
+    const room = state.rooms?.find(item => item.id === roomId);
+    button.disabled = !room || room.archived || roomId === MONITOR_ROOM || roomReadOnly(roomId);
+  }
   for(const select of $$(".model-select")) {
     const pane=select._pane||null,owner=roomContextOwner(pane);
-    const disabled=!owner.roomId||owner.busy;
+    const disabled=!owner.roomId||owner.busy||owner.readOnly;
     select.disabled=disabled;
     if(select._triggerButton)select._triggerButton.disabled=disabled;
     const effort=$(".effort-select",select.closest("form"));if(effort){effort.disabled=disabled;if(effort._triggerButton)effort._triggerButton.disabled=disabled;}
     const form=select.closest("form");
     if(form) {
+      syncReadOnlyComposer(form,pane,owner);
       const send=$('button[type="submit"]',form);
       const blocked=composerBlocked(pane), queued=!!owner.data?.busy;
       if(send){send.disabled=blocked;send.setAttribute("aria-label",queued?"대기열에 추가":"메시지 보내기");send.title=queued?"대기열에 추가 · 현재 답변이 끝나면 순서대로 보냅니다":"메시지 보내기";}
+      for (const attach of $$(".attach-button, #attach-button, input[type=file]", form)) attach.disabled = !!blocked;
       const input=$("textarea",form);
       if(input){
-        input.disabled=!!blocked;
+        input.readOnly=!!owner.readOnly;
+        input.disabled=!!blocked && !owner.readOnly;
         composerSuggestions?.sync({input,roomId:owner.roomId,data:owner.data,model:select.value,effort:effort?.value || "",queued,
           blocked:blocked || pendingMessages.has(owner.roomId) || Boolean(composerRecorder && composerRecorder.status!=="idle"),
           hasAttachments:Boolean((pane || state).pendingAttachments?.length)});
+        if (owner.readOnly) input.placeholder = "읽기 전용";
       }
       const actions=$$(".context-action",form);
       if(actions[0])actions[0].disabled=owner.busy;
@@ -1970,16 +2061,16 @@ function confirmModelChange(label,canReset) {
   });
 }
 async function requestModelChange(select, value) {
-  const pane=select._pane||null,{roomId,busy}=roomContextOwner(pane),userId=state.session?.user?.id;
+  const pane=select._pane||null,{roomId,busy,readOnly}=roomContextOwner(pane),userId=state.session?.user?.id;
   const previous=select.dataset.chosen ?? select.value;
   select.value=previous;
-  if(!roomId||!select.isConnected||busy||value===previous)return;
+  if(!roomId||!select.isConnected||busy||readOnly||value===previous)return;
   const operation=Symbol("model-change");modelChanges.set(roomId,operation);select._changingModel=operation;updateModelAvailability();
   const stillCurrent=()=>select.isConnected&&contextOwnerCurrent(roomId,userId,pane);
   try {
     const model=state.models.find(item=>item.value===value);
     const choice=await confirmModelChange(value?(model?modelLabel(model):value):"자동 선택 · 추천",roomContextOwner(pane).canManage);
-    if(!choice||!stillCurrent())return;
+    if(!choice||!stillCurrent()||roomReadOnly(roomId))return;
     if(roomContextOwner(pane).working){toast("답변이 끝난 뒤 모델을 변경해주세요.");return;}
     if(choice==="reset") {
       if(!roomContextOwner(pane).canManage)return;
@@ -2207,8 +2298,9 @@ function renderExtraPanes() {
     const callButton = document.createElement("button");
     callButton.type = "button"; callButton.className = "voice-call-button"; callButton.append(icon("phone"));
     callButton.setAttribute("aria-label", "이 대화에 전화하기"); callButton.title = "이 대화에 전화하기";
-    callButton.disabled = !room || room.archived || room.id === MONITOR_ROOM;
-    callButton.onclick = () => voiceUI?.open(room); header.append(callButton);
+    callButton._pane = pane;
+    callButton.disabled = !room || room.archived || room.id === MONITOR_ROOM || roomReadOnly(pane.roomId);
+    callButton.onclick = () => { if (!roomReadOnly(pane.roomId)) voiceUI?.open(state.rooms.find(item=>item.id===pane.roomId)); }; header.append(callButton);
     const shareButton = contextElement("button", undefined, "icon-button room-share-button"); shareButton.type = "button"; shareButton.append(icon("share"));
     shareButton.setAttribute("aria-label", "대화 공유 및 다운로드"); shareButton.title = "공유"; shareButton.disabled = !room || room.id === MONITOR_ROOM;
     shareButton.onclick = () => sharingUI?.open(state.rooms.find(item => item.id === pane.roomId)); header.append(shareButton);
@@ -2363,6 +2455,7 @@ async function submitPane(event, index, skipTopic = false) {
   } catch (error) {
     if(!sendCurrent())return;
     if(accepted){toast("메시지는 접수됐습니다. 대화를 다시 불러오고 있어요.");return;}
+    if (recoverReadOnlySend(error, {roomId, pane, input, text, attachmentGeneration, pending})) return;
     presenceErrors.add(roomId);
     if (pending) {
       pending.pending = "failed";
@@ -2428,6 +2521,7 @@ function assignExtra(index, roomId) {
   });
   clearAttachmentDraft(pane);
   pane.roomId = roomId;
+  focusSidebarBranch(roomId);
   touchConversation(roomId);
   pane.data = null;
   pane.busy = false;
@@ -2498,13 +2592,13 @@ function bind() {
   $$(".split-picker button").forEach((button) => {
     button.addEventListener("click", () => setLayout(Number(button.dataset.split)));
   });
-  $("#attach-button").addEventListener("click", () => $("#attachment-input").click());
+  $("#attach-button").addEventListener("click", () => { if (!composerBlocked()) $("#attachment-input").click(); });
   $("#attachment-input").addEventListener("change", (event) => {
     uploadAttachments(event.target.files);
     event.target.value = "";
   });
   $("#record-button").addEventListener("click", () => toggleRecording());
-  $("#voice-call-button").addEventListener("click", () => voiceUI?.open(state.rooms.find(room => room.id === currentBranchId())));
+  $("#voice-call-button").addEventListener("click", () => { const id=state.selectedRoom; if (!roomReadOnly(id)) voiceUI?.open(state.rooms.find(room => room.id === id)); });
   $("#record-cancel-button").addEventListener("click", cancelActiveRecording);
   $("#message-input").addEventListener("paste", event => pasteAttachments(event));
   $("#message-input").addEventListener("keydown", (event) => {

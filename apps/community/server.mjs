@@ -424,7 +424,26 @@ export async function startCommunity(options = {}) {
     const lineage=JSON.parse(db.prepare("SELECT value FROM settings WHERE key=?").get("lineage:"+room.id)?.value || "{}");
     return lineage.operation==="fork" && !db.prepare("SELECT 1 FROM messages m LEFT JOIN message_origins o ON o.message_id=m.id WHERE m.room_id=? AND m.kind='human' AND o.message_id IS NULL LIMIT 1").get(room.id);
   }
-  function roomView(room) {
+  function roomIsReadOnly(room, userId) {
+    return Boolean(db.prepare("SELECT 1 FROM settings WHERE key IN (?,?) LIMIT 1")
+      .get("fork-readonly:" + room.id, "fork-readonly:" + userId + ":" + room.id));
+  }
+  function assertRoomWritable(room, userId) {
+    if (roomIsReadOnly(room, userId)) throw Object.assign(failure(409, "가지치기한 원본은 읽기 전용입니다. 하위 대화에서 이어가거나 다시 Fork해 주세요."), {code:"ROOM_READ_ONLY"});
+  }
+  function lockForkSource(room, userId) {
+    // A member's private fork must not freeze the shared room for everybody.
+    const global = room.owner_id === userId, now = Date.now();
+    const key = global ? "fork-readonly:" + room.id : "fork-readonly:" + userId + ":" + room.id;
+    db.prepare("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING").run(key, JSON.stringify({reason:"forked",createdAt:now}));
+    const filter = "room_id=? AND deleted_at IS NULL" + (global ? "" : " AND owner_id=?");
+    const params = global ? [room.id] : [room.id, userId];
+    const paused = db.prepare("UPDATE routines SET enabled=0,next_run_at=NULL,updated_at=? WHERE enabled=1 AND " + filter).run(now, ...params).changes;
+    db.prepare("UPDATE routine_runs SET status='skipped',reason='source_forked',finished_at=? WHERE status='queued' AND routine_id IN (SELECT id FROM routines WHERE " + filter + ")").run(now, ...params);
+    return Number(paused);
+  }
+  function roomView(room, userId) {
+    const readOnly = roomIsReadOnly(room, userId);
     return {
       id: room.id,
       name: room.name,
@@ -433,6 +452,8 @@ export async function startCommunity(options = {}) {
       pendingTitle: pendingRoomTitle(room),
       personal: isPersonalRoom(room) || isMailRoom(room),
       role: room.member_role,
+      readOnly,
+      readOnlyReason: readOnly ? "forked" : null,
       sharing: {
         mode: isPersonalRoom(room) || isMailRoom(room) ? "private" : "shared",
         canInvite: room.id !== MONITOR_ROOM && room.member_role === "owner" && !isPersonalRoom(room) && !isMailRoom(room),
@@ -835,6 +856,7 @@ export async function startCommunity(options = {}) {
     return {accepted:true,queued:true,queueId:item.id};
   }
   function enqueueMessage(room,user,scopedNonce,payload) {
+    assertRoomWritable(room, user.id);
     limit("message:"+user.id,30);
     const item=transaction(()=>{
       const existing=messageQueue.existing(room.id,scopedNonce);
@@ -875,7 +897,7 @@ export async function startCommunity(options = {}) {
         if(error.safeToRetry || closing) continue;
         const reason=error.status ? error.message : "연결 상태를 확인한 뒤 다시 보내 주세요.";
         const failed=transaction(()=>messageQueue.remove(item.id,"failed",reason));
-        if(failed) insertMessage(item.room_id,"system","안내",`${item.author}님의 대기 메시지를 실행하지 못했습니다. ${reason}`);
+        if(failed && error.code!=="ROOM_READ_ONLY") insertMessage(item.room_id,"system","안내",`${item.author}님의 대기 메시지를 실행하지 못했습니다. ${reason}`);
       }
     }
     // Requests without an AI reply do not produce a job completion callback.
@@ -912,6 +934,7 @@ export async function startCommunity(options = {}) {
     const existingQueue=messageQueue.existing(room.id,scopedNonce);
     if(existingQueue && !queuedItem) return queueAccepted(existingQueue);
     if(queuedItem && (!existingQueue || existingQueue.id!==queuedItem.id || existingQueue.state!=="queued")) throw failure(409,"대기 메시지가 이미 처리되었거나 취소되었습니다.");
+    assertRoomWritable(room, user.id);
     const mustWait=()=>roomJobs.has(room.id) || (!queuedItem && messageQueue.has(room.id)) || (selected.length && jobs.size>=2);
     if(!queuedItem && body.queueIfBusy===true && room.id!==MONITOR_ROOM && mustWait()) return enqueueMessage(room,user,scopedNonce,payload);
     if (!queuedItem?.payload.continuation && !attachmentIds.length && content.toLowerCase() === "model") {
@@ -919,6 +942,7 @@ export async function startCommunity(options = {}) {
       const listed = activeBackend() === "gateway" ? {models:[],failures:[]} : await pool.listModels();
       if(closing || signal?.aborted) throw failure(503,"요청이 중지되었습니다.");
       roomFor(room.id,user);
+      assertRoomWritable(room, user.id);
       if(db.prepare("SELECT 1 FROM messages WHERE room_id=? AND client_nonce=?").get(room.id,scopedNonce)) return accepted();
       const raced=messageQueue.existing(room.id,scopedNonce);
       if(raced && !queuedItem) return queueAccepted(raced);
@@ -958,6 +982,7 @@ export async function startCommunity(options = {}) {
     if(db.prepare("SELECT 1 FROM messages WHERE room_id=? AND client_nonce=?").get(room.id,scopedNonce)) return accepted();
     const afterAwaitQueue=messageQueue.existing(room.id,scopedNonce);
     if(afterAwaitQueue && !queuedItem) return queueAccepted(afterAwaitQueue);
+    assertRoomWritable(room, user.id);
     if(!queuedItem && body.queueIfBusy===true && mustWait()) return enqueueMessage(room,user,scopedNonce,payload);
     if ((selected.length || queuedItem) && mustWait())
       throw Object.assign(failure(429, "봇이 다른 답변을 작성 중입니다. 잠시 후 다시 시도해 주세요."), {safeToRetry:true});
@@ -1010,6 +1035,7 @@ export async function startCommunity(options = {}) {
       reserve(userId,1);
       let current=roomId ? db.prepare("SELECT * FROM rooms WHERE id=? AND owner_id=?").get(roomId,userId) : null;
       if (roomId && (!current || !isMailRoom(current))) throw failure(403,"메일 대화를 찾을 수 없습니다.");
+      if (current) assertRoomWritable(current, userId);
       if (!current) {
         if (db.prepare("SELECT count(*) n FROM rooms WHERE owner_id=?").get(userId).n>=100) throw failure(409,"메일 대화 수가 많습니다. 앱에서 대화를 정리해 주세요.");
         const nextId=randomUUID();
@@ -1036,11 +1062,12 @@ export async function startCommunity(options = {}) {
     getName:()=>setupVault.name,getOrigin:()=>requestOrigins.appOrigin || origin || boundOrigin,
     ...(options.notificationNow ? {now:options.notificationNow} : {})});
 
-  function routineOwner(ownerId, roomId) {
+  function routineOwner(ownerId, roomId, writable = false) {
     const owner=db.prepare("SELECT id,username,display_name AS displayName,role FROM users WHERE id=?").get(ownerId);
     if(!owner) throw failure(403,"루틴을 만든 계정을 확인해 주세요.");
     const room=roomFor(roomId,owner);
     if(room.id===MONITOR_ROOM || roomPreference(ownerId,roomId).archived) throw failure(403,"사용 중인 대화에서 루틴을 설정해 주세요.");
+    if (writable) assertRoomWritable(room, ownerId);
     return {owner,room};
   }
   function validateRoutineModel(input) {
@@ -1049,7 +1076,7 @@ export async function startCommunity(options = {}) {
     return input;
   }
   const routines=createRoutines({db,authorize:(ownerId,roomId)=>{routineOwner(ownerId,roomId);},dispatch:async({routine,occurrenceId,signal})=>{
-    const {owner,room}=routineOwner(routine.ownerId,routine.roomId);
+    const {owner,room}=routineOwner(routine.ownerId,routine.roomId,true);
     return submitRoomMessage(room,owner,{text:routine.prompt,clientNonce:"routine:"+occurrenceId,model:routine.model,effort:routine.effort,botIds:[BOTS[0].id]},signal);
   }});
 
@@ -1265,6 +1292,7 @@ export async function startCommunity(options = {}) {
       const voiceMatch = url.pathname.match(/^\/api\/rooms\/([a-f0-9-]{36})\/voice\/transcribe$/);
       if (voiceMatch && method === "POST") {
         const room = roomFor(voiceMatch[1],user);
+        assertRoomWritable(room, user.id);
         if (room.id === MONITOR_ROOM) throw failure(400,"대화를 선택한 뒤 전화해 주세요.");
         if (!voice.status().configured) throw failure(503,"음성 통화에는 Groq API 연결이 필요합니다. 설정에서 연결해 주세요.");
         limit("voice:"+user.id,30);
@@ -1277,6 +1305,7 @@ export async function startCommunity(options = {}) {
           const current = userFor(req);
           if (!current || current.sessionHash !== user.sessionHash) throw failure(403,"다시 로그인한 뒤 전화해 주세요.");
           roomFor(room.id,current);
+          assertRoomWritable(room, current.id);
         };
         let upload, result;
         try {
@@ -1540,6 +1569,7 @@ export async function startCommunity(options = {}) {
       const attachmentMatch = url.pathname.match(/^\/api\/rooms\/([a-f0-9-]{36})\/attachments(?:\/([a-f0-9-]{36}))?$/);
       if (attachmentMatch && method === "POST" && !attachmentMatch[2]) {
         const room = roomFor(attachmentMatch[1], user);
+        assertRoomWritable(room, user.id);
         const usedBefore = db.prepare("SELECT bytes FROM media_usage WHERE user_id=? AND day=?").get(user.id, day())?.bytes ?? 0;
         const totalBefore = db.prepare("SELECT coalesce(sum(size),0) bytes FROM attachments").get().bytes;
         if (usedBefore >= mediaDailyLimit) throw failure(429, "오늘 업로드 용량을 모두 사용했습니다.");
@@ -1553,6 +1583,7 @@ export async function startCommunity(options = {}) {
           const current=userFor(req);
           if(!current||current.sessionHash!==user.sessionHash)throw failure(401,"로그인이 필요합니다.");
           roomFor(room.id,current);
+          assertRoomWritable(room, current.id);
           attachment = transaction(() => {
             const used = db.prepare("SELECT bytes FROM media_usage WHERE user_id=? AND day=?").get(user.id, day())?.bytes ?? 0;
             const total = db.prepare("SELECT coalesce(sum(size),0) bytes FROM attachments").get().bytes;
@@ -1692,7 +1723,7 @@ export async function startCommunity(options = {}) {
           .all(user.id)
           .filter(room => { try { roomFor(room.id, user); return true; } catch { return false; } });
         conversationActivity.archiveInactive(user.id, {roomIds: accessibleRooms.map(room => room.id)});
-        const rooms = accessibleRooms.map(room => ({...roomView(room), ...roomPreference(user.id, room.id), busy:roomJobs.has(room.id)}));
+        const rooms = accessibleRooms.map(room => ({...roomView(room,user.id), ...roomPreference(user.id, room.id), busy:roomJobs.has(room.id)}));
         const memberIds = new Set(rooms.map((room) => room.id));
         return reply(res, 200, {
           rooms,
@@ -1715,7 +1746,7 @@ export async function startCommunity(options = {}) {
           for(const room of rooms) db.prepare("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("room-ui:"+user.id+":"+room.id,JSON.stringify({...roomPreference(user.id, room.id),pinned:false,archived:true}));
           const id=randomUUID();db.prepare("INSERT INTO rooms VALUES(?,?,?,?,?)").run(id,"새 대화","",user.id,Date.now());db.prepare("INSERT INTO room_members VALUES(?,?,?)").run(id,user.id,"owner");
           if(user.role==="admin") db.prepare("INSERT INTO settings VALUES(?,?)").run("private-fork:"+id,"1");
-          return {room:roomView(roomFor(id,user)),archived:rooms.length};
+          return {room:roomView(roomFor(id,user),user.id),archived:rooms.length};
         });return reply(res,201,result);
       }
       if (url.pathname === "/api/rooms" && method === "POST") {
@@ -1738,7 +1769,7 @@ export async function startCommunity(options = {}) {
           );
           return roomFor(id, user);
         });
-        return reply(res, 201, { room: roomView(room) });
+        return reply(res, 201, { room: roomView(room,user.id) });
       }
       if (url.pathname === "/api/rooms/join" && method === "POST") {
         const invite = text(body.token, 200, true);
@@ -1763,10 +1794,14 @@ export async function startCommunity(options = {}) {
           ).run(Date.now(), hash(invite));
           return roomFor(row.room_id, user);
         });
-        return reply(res, 200, { room: roomView(room) });
+        return reply(res, 200, { room: roomView(room,user.id) });
       }
       const routineMatch=url.pathname.match(/^\/api\/routines\/([a-f0-9-]{36})(?:\/(run))?$/);
       if(routineMatch) {
+        if (method==="POST" || (method==="PATCH" && body.enabled!==false)) {
+          const routine=db.prepare("SELECT room_id FROM routines WHERE id=? AND owner_id=? AND deleted_at IS NULL").get(routineMatch[1],user.id);
+          if (routine) assertRoomWritable(roomFor(routine.room_id,user),user.id);
+        }
         if(!routineMatch[2] && method==="PATCH") return reply(res,200,{routine:await routines.update(user.id,routineMatch[1],validateRoutineModel(body))});
         if(!routineMatch[2] && method==="DELETE") {await routines.remove(user.id,routineMatch[1]);return reply(res,200,{ok:true});}
         if(routineMatch[2]==="run" && method==="POST") return reply(res,202,await routines.runNow(user.id,routineMatch[1],{requestId:body.requestId}));
@@ -1787,6 +1822,8 @@ export async function startCommunity(options = {}) {
         }
         if(queueMatch[3]==="send-now" && method==="POST") {
           if(item.state!=="queued") return reply(res,202,queueAccepted(item));
+          assertRoomWritable(room, user.id);
+          assertRoomWritable(room, item.author_id);
           const run=activeRuns.get(room.id);
           if(roomJobs.has(room.id) && !run) throw failure(409,"현재 처리가 끝난 뒤 이 메시지를 반영할 수 있습니다.");
           if(run && (run.userId!==user.id || item.author_id!==user.id)) throw failure(403,"본인의 진행 중인 요청에 본인의 메시지만 추가할 수 있습니다.");
@@ -1889,7 +1926,7 @@ export async function startCommunity(options = {}) {
           db.prepare("DELETE FROM settings WHERE key=?").run("pending-title:"+room.id);
           conversationActivity.touch(user.id, room.id);
         });
-        return reply(res,200,{room:{...roomView(roomFor(room.id,user)),...roomPreference(user.id,room.id)}});
+        return reply(res,200,{room:{...roomView(roomFor(room.id,user),user.id),...roomPreference(user.id,room.id)}});
       }
       if (match[2] === "export" && method === "GET") {
         // A stable boundary excludes messages arriving while a download is paged.
@@ -1910,12 +1947,13 @@ export async function startCommunity(options = {}) {
       }
       if(match[2]==="routines") {
         if(method==="GET") return reply(res,200,{routines:await routines.list(user.id,room.id)});
-        if(method==="POST") return reply(res,201,{routine:await routines.create(user.id,room.id,validateRoutineModel(body))});
+        if(method==="POST") {assertRoomWritable(room,user.id);return reply(res,201,{routine:await routines.create(user.id,room.id,validateRoutineModel(body))});}
       }
       if (match[2] === "usage" && method === "GET") {
         return reply(res,200,modelUsage.snapshot(room.id,{includeProviders:user.role === "admin"}));
       }
       if (match[2] === "context-reset" && method === "POST") {
+        assertRoomWritable(room, user.id);
         if(room.id===MONITOR_ROOM) throw failure(400,"대시보드의 맥락은 초기화할 수 없습니다.");
         if(room.member_role!=="owner") throw failure(403,"세션 소유자만 맥락을 초기화할 수 있습니다.");
         if(roomJobs.has(room.id)||messageQueue.has(room.id)) throw failure(409,"진행 중이거나 대기 중인 메시지가 처리된 뒤 모델을 변경해 주세요.");
@@ -1963,20 +2001,12 @@ export async function startCommunity(options = {}) {
           cutoff = message?.rowid || 0;
           throughMessageId = message?.id || null;
         }
-        const forks=transaction(()=>{
+        const result=transaction(()=>{
           const children = branching ? forkLinks().filter(link => {
             if (link.operation !== "fork" || link.parent !== room.id) return false;
             try { roomFor(link.id, user); return true; } catch { return false; }
           }) : [];
-          const pointOrigin = throughMessageId ? messageOrigin(throughMessageId) : null;
-          const siblings = children.filter(link => {
-            if (link.throughMessageId) return link.throughMessageId === throughMessageId;
-            // Earlier tail forks did not record their cutoff. Recover it from
-            // copied messages, ignoring any messages later written in the child.
-            const inherited = db.prepare("SELECT o.origin_id FROM messages m JOIN message_origins o ON o.message_id=m.id WHERE m.room_id=? ORDER BY m.rowid DESC LIMIT 1").get(link.id);
-            return (inherited?.origin_id || null) === pointOrigin;
-          });
-          const plan = planForkBranches({sourceName: room.name, branching, siblingCount: siblings.length, children});
+          const plan = planForkBranches({sourceName: room.name, branching, children});
           const created = plan.map(({name, branchIndex}) => {
             // Both inserts are in this transaction: insufficient capacity for
             // the second child rolls back the first child and its copied data.
@@ -1989,12 +2019,13 @@ export async function startCommunity(options = {}) {
             copyTranscript(room.id, id, user.id, cutoff);
             db.prepare("INSERT INTO settings VALUES(?,?)").run("pending-title:"+id,"1");
             db.prepare("INSERT INTO settings VALUES(?,?)").run("lineage:"+id, JSON.stringify({ parent: room.id, parents: [room.id], operation: "fork", throughMessageId, ...(branching ? {branchIndex} : {}) }));
-            return roomView(roomFor(id,user));
+            return roomView(roomFor(id,user),user.id);
           });
           conversationActivity.touch(user.id, room.id);
-          return created;
+          const pausedRoutineCount = branching ? lockForkSource(room, user.id) : 0;
+          return {created, pausedRoutineCount};
         });
-        return reply(res,201,{room:forks.at(-1), ...(branching ? {createdRooms:forks, branchPoint:{parentId:room.id, throughMessageId}, initialSplit:forks.length === 2} : {})});
+        return reply(res,201,{room:result.created.at(-1), ...(branching ? {createdRooms:result.created, sourceRoom:roomView(roomFor(room.id,user),user.id), branchPoint:{parentId:room.id, throughMessageId}, initialSplit:true, pausedRoutineCount:result.pausedRoutineCount} : {})});
       }
       if (match[2] === "merge" && method === "POST") {
         const sourceId = text(body.sourceId, 36, true);
@@ -2039,7 +2070,7 @@ export async function startCommunity(options = {}) {
           conversationActivity.touch(user.id, source.id);
           return roomFor(id, user);
         });
-        return reply(res, 201, { room: roomView(merged), contextTruncated: snapshot.truncated });
+        return reply(res, 201, { room: roomView(merged,user.id), contextTruncated: snapshot.truncated });
       }
       if (match[2] === "shared-copy" && method === "POST") {
         if (room.id === MONITOR_ROOM || room.member_role !== "owner") throw failure(403, "대화 소유자만 공유용 사본을 만들 수 있습니다.");
@@ -2055,9 +2086,10 @@ export async function startCommunity(options = {}) {
           if (body.includeHistory) copyTranscript(room.id, id, user.id);
           return roomFor(id, user);
         });
-        return reply(res, 201, {room: roomView(shared)});
+        return reply(res, 201, {room: roomView(shared,user.id)});
       }
       if (match[2] === "compact" && method === "POST") {
+        assertRoomWritable(room, user.id);
         if(room.id===MONITOR_ROOM) throw failure(400,"대시보드는 압축할 수 없습니다.");
         if(room.member_role!=="owner") throw failure(403,"세션 소유자만 압축할 수 있습니다.");
         if(roomJobs.has(room.id)||messageQueue.has(room.id)) throw failure(409,"진행 중이거나 대기 중인 메시지가 처리된 뒤 압축해 주세요.");
@@ -2113,7 +2145,7 @@ export async function startCommunity(options = {}) {
         if(!current||current.sessionHash!==user.sessionHash)throw failure(401,"로그인이 필요합니다.");
         const refreshedRoom=roomFor(room.id,current);
         return reply(res, 200, {
-          room: {...roomView(refreshedRoom),...roomPreference(user.id,room.id)},
+          room: {...roomView(refreshedRoom,user.id),...roomPreference(user.id,room.id)},
           members: db
             .prepare(
               "SELECT u.id,u.display_name displayName,m.role FROM room_members m JOIN users u ON m.user_id=u.id WHERE m.room_id=?",
@@ -2159,6 +2191,7 @@ export async function startCommunity(options = {}) {
         error: e.status
           ? e.message
           : "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        ...(e.code === "ROOM_READ_ONLY" ? {code:e.code} : {}),
       });
     }
   });

@@ -365,3 +365,32 @@ test('native v2 logout ends the native call and ignores late state from the old 
   app.setUser('other'); app.emitNative({action: 'state', roomId: 'one', userId: 'owner', state: 'listening'});
   assert.equal(app.ui.roomId, null); assert.equal(app.spoken.length, 0);
 });
+
+test('frozen sources reject phone buttons, external links and native call resume before audio starts', async () => {
+  for (const native of [false, 2]) {
+    const app = setup({native}); app.rooms[0].readOnly = true;
+    await app.start();
+    app.location.href = 'https://bots.example.org/?room=one&call=1';
+    app.ui.handleLink(); await tick();
+    assert.equal(app.ui.roomId, null); assert.equal(app.streams.length, 0);
+    assert.equal(app.calls.length, 0); assert.match(app.toasts.at(-1), /새 가지/);
+    if (native) {
+      app.emitNative({action:'state',roomId:'one',userId:'owner',state:'listening'});
+      assert.equal(app.ui.roomId, null);
+      assert.equal(app.nativeMessages.at(-1).action, 'end');
+    }
+  }
+});
+test('an open call releases its microphone when a refreshed room becomes read only', async () => {
+  const app = setup(); await app.start();
+  assert.equal(app.streams.length, 1);
+  app.rooms[0].readOnly = true; app.ui.handleLink(); await tick();
+  assert.equal(app.ui.roomId, null);
+  assert.equal(app.streams[0].track.stops, 1);
+  assert.equal(app.calls.some(call => call.path.endsWith('/messages')), false);
+});
+test('a fork discovered by the call preflight never acquires a microphone', async () => {
+  const app = setup({apiResult:(path,options,fallback)=>path==='/api/rooms/one'?{room:{id:'one',readOnly:true}}:fallback(path,options)});
+  await app.start(); assert.equal(app.ui.roomId, null); assert.equal(app.streams.length, 0);
+  assert.match(app.node('.voice-call-status').textContent, /새 가지/);
+});

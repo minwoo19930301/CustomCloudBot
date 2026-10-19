@@ -68,6 +68,44 @@ export function layoutBranches(rooms, links, {query = '', order = []} = {}) {
   return {rows: displayed, edges, laneCount: rows.length ? Math.max(...rows.map(row => row.lane)) + 1 : 0};
 }
 
+/** A collision-free key shared by focus state and the SVG edge renderer. */
+export function branchEdgeKey(from, to) {
+  return JSON.stringify([from, to]);
+}
+
+/** Trace toward and away from this session, without wandering into its cousins. */
+export function branchFocus({rows = [], edges = []} = {}, roomId) {
+  const ids = new Set(rows.map(row => row.id));
+  if (!ids.has(roomId)) return null;
+  const incoming = new Map([...ids].map(id => [id, []]));
+  const outgoing = new Map([...ids].map(id => [id, []]));
+  for (const edge of edges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to) || edge.from === edge.to) continue;
+    incoming.get(edge.to).push(edge);
+    outgoing.get(edge.from).push(edge);
+  }
+  const roomIds = new Set([roomId]), edgeKeys = new Set();
+  const trace = (connections, nextId) => {
+    const visited = new Set(), pending = [roomId];
+    while (pending.length) {
+      const id = pending.pop();
+      if (visited.has(id)) continue;
+      visited.add(id);
+      for (const edge of connections.get(id)) {
+        const next = nextId(edge);
+        roomIds.add(next);
+        edgeKeys.add(branchEdgeKey(edge.from, edge.to));
+        pending.push(next);
+      }
+    }
+  };
+  // Start both traversals at the selected session. Starting descendants from
+  // every ancestor would highlight the entire family, including other forks.
+  trace(incoming, edge => edge.from);
+  trace(outgoing, edge => edge.to);
+  return {roomIds, edgeKeys};
+}
+
 /** Keep curved branch joins away from other row nodes, including after a drag. */
 export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {rowHeight = 44, maxWidth = 72} = {}) {
   const step = 12, origin = 10;

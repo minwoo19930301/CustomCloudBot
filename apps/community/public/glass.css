@@ -553,3 +553,9 @@ dialog::backdrop,
 .branch-archive-row { min-height:36px; padding:0 8px; gap:8px; }
 .branch-archive-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
 .branch-archive-row .branch-restore { color:var(--glass-accent); cursor:pointer; }
+
+/* Fork sources retain selectable drafts and history, with one quiet action. */
+.composer-readonly { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:8px 4px; color:var(--muted); font-size:12px; }
+.composer-readonly-fork { flex:none; padding:6px 10px; border:1px solid rgba(var(--pane-tint), .25); border-radius:10px; color:var(--session-color,var(--text)); background:rgba(255,255,255,.3); font:inherit; cursor:pointer; }
+.composer.is-readonly textarea { cursor:text; }
+.composer.is-readonly .composer-footer button:disabled { opacity:.4; cursor:default; }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {layoutBranches, relatedBranchIds, branchGraphGeometry, branchDisplayName} from '../public/branch-graph.mjs';
+import {layoutBranches, relatedBranchIds, branchGraphGeometry, branchDisplayName, branchFocus, branchEdgeKey} from '../public/branch-graph.mjs';
 const rooms = ['root','a','b','deep','merge','other'].map((id, i) => ({id, name:id, createdAt:i+1}));
 const links = [{id:'a',parent:'root'},{id:'b',parent:'root'},{id:'deep',parent:'a'},{id:'merge',parent:'deep',mergedFrom:'b'}];
 test('pinning moves sessions above manual order without rewriting lineage and unpinning restores order', () => {
@@ -56,6 +56,50 @@ test('nested forks have stable generation depths through search, manual placemen
   }
   const searched = layoutBranches(r,l,{query:'a2'});
   assert.deepEqual(searched.edges,[{from:'root',to:'a',secondary:false},{from:'a',to:'a2',secondary:false}]);
+});
+test('flow focus follows ancestors and descendants without selecting siblings or merge co-parents', () => {
+  const graph = layoutBranches(rooms,links), focused = branchFocus(graph,'a');
+  assert.deepEqual(focused.roomIds,new Set(['a','root','deep','merge']));
+  assert.deepEqual(focused.edgeKeys,new Set([
+    branchEdgeKey('root','a'),branchEdgeKey('a','deep'),branchEdgeKey('deep','merge')
+  ]));
+  assert.ok(!focused.roomIds.has('b'));
+  assert.ok(!focused.roomIds.has('other'));
+  const merge = branchFocus(graph,'merge');
+  assert.deepEqual(merge.roomIds,new Set(['merge','deep','b','a','root']));
+  assert.deepEqual(merge.edgeKeys,new Set(graph.edges.map(edge => branchEdgeKey(edge.from,edge.to))));
+});
+test('flow focus does not highlight shortcut edges that bypass the selected session', () => {
+  const graph = layoutBranches([{id:'root'},{id:'a'},{id:'merge'}],[{id:'a',parent:'root'},{id:'merge',parent:'a',mergedFrom:'root'}]);
+  const focused = branchFocus(graph,'a');
+  assert.deepEqual(focused.roomIds,new Set(['root','a','merge']));
+  assert.deepEqual(focused.edgeKeys,new Set([branchEdgeKey('root','a'),branchEdgeKey('a','merge')]));
+  assert.ok(!focused.edgeKeys.has(branchEdgeKey('root','merge')));
+});
+test('focus survives display order and search while respecting hidden or missing endpoints', () => {
+  const baseline = branchFocus(layoutBranches(rooms,links),'deep');
+  assert.deepEqual(branchFocus(layoutBranches(rooms,links,{order:['merge','b','deep','root','a','other']}),'deep'),baseline);
+  const searched = branchFocus(layoutBranches(rooms,links,{query:'deep'}),'deep');
+  assert.deepEqual(searched.roomIds,new Set(['deep','a','root']));
+  assert.ok(!searched.edgeKeys.has(branchEdgeKey('deep','merge')));
+  const archived = layoutBranches(rooms.map(room => ({...room,archived:room.id==='root'})),links);
+  assert.ok(!branchFocus(archived,'a').roomIds.has('root'));
+  assert.equal(branchFocus(archived,'root'),null);
+  assert.equal(branchFocus(layoutBranches(rooms,links),null),null);
+  assert.equal(branchFocus(layoutBranches(rooms,links),'missing'),null);
+  assert.equal(branchFocus({},'missing'),null);
+});
+test('focus is bounded for malformed cycles, ignores missing nodes and never mutates graph input', () => {
+  const graph = Object.freeze({
+    rows:Object.freeze(['a','b','c'].map(id => Object.freeze({id}))),
+    edges:Object.freeze([{from:'a',to:'b'},{from:'b',to:'a'},{from:'b',to:'c'},{from:'secret',to:'b'}].map(Object.freeze))
+  });
+  const result = branchFocus(graph,'b');
+  assert.deepEqual(result.roomIds,new Set(['a','b','c']));
+  assert.equal(result.edgeKeys.size,3);
+  assert.ok(!result.edgeKeys.has(branchEdgeKey('secret','b')));
+  assert.deepEqual(branchFocus(graph,'b'),result);
+  assert.notEqual(branchEdgeKey('a:b','c'),branchEdgeKey('a','b:c'));
 });
 test('search preserves ancestors of both merge parents and marks only actual matches', () => {
   const result=layoutBranches(rooms,links,{query:'MERGE'});

@@ -102,7 +102,8 @@ function setupSubmit({ paneMode, busy = true, uploading = false, error = false, 
   const start = paneMode ? "async function submitPane(" : "async function submitMessage(";
   const end = paneMode ? "async function refreshExtra(" : "async function authSubmit(";
   const recordingGuard = source.slice(source.indexOf("function recordingBlocksSend("), source.indexOf("function syncRecordingButtons(", source.indexOf("function recordingBlocksSend(")));
-  vm.runInNewContext(recordingGuard + source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))) + `\nthis.submit = () => ${paneMode ? "submitPane({preventDefault(){},currentTarget:{}},0,true)" : "submitMessage({preventDefault(){}},true)"};`, context);
+  const readOnlyGuards = source.slice(source.indexOf("function roomReadOnly("), source.indexOf("function clearPendingAttachments("));
+  vm.runInNewContext(readOnlyGuards + recordingGuard + source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))) + `\nthis.submit = () => ${paneMode ? "submitPane({preventDefault(){},currentTarget:{}},0,true)" : "submitMessage({preventDefault(){}},true)"};`, context);
   return { ...context, input, pane, calls, notices, bubbles, submit: context.submit };
 }
 

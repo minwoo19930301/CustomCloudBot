@@ -39,7 +39,7 @@ function fixture({ paneMode = false, text = '사진을 확인해 줘', busy = fa
     crypto: { randomUUID: () => `nonce-${++nonce}` },
     $: selector => ({ '#message-input': input, textarea: input, '#model-select': model, '.model-select': model,
       '#effort-select': effort, '.effort-select': effort, '#send-button': sendButton })[selector],
-    roomContextOwner: current => ({ roomId: current ? current.roomId : state.selectedRoom, data: current ? current.data : state.roomData }),
+    roomContextOwner: current => ({ readOnly: !!(current ? current.data?.room?.readOnly : state.roomData?.room?.readOnly), roomId: current ? current.roomId : state.selectedRoom, data: current ? current.data : state.roomData }),
     contextOwnerCurrent: (id, userId, current) => state.session?.user?.id === userId &&
       (current ? state.extra.includes(current) && current.roomId === id : state.selectedRoom === id),
     offerTopicChoice: async () => false,
@@ -295,3 +295,42 @@ test('discard removes only the exact failed message and stale retry handlers can
   app.discard(message, app.roomId);
   assert.equal(app.pendingMessages.get(app.roomId), replacement);
 });
+
+for (const paneMode of [false, true]) {
+  const surface = paneMode ? 'split' : 'main';
+  test(`${surface}: a frozen source keeps its draft and attachments and refuses new sends or retries`, async () => {
+    const app = fixture({paneMode});
+    const failed = await failSend(app);
+    const data = paneMode ? app.pane.data : app.state.roomData;
+    data.room.readOnly = true;
+    app.input.value = '가지에서 이어갈 초안';
+    app.owner.pendingAttachments = [{attachment: app.image}];
+    await app.submit(); await app.retry(failed);
+    assert.equal(app.calls.length, 1);
+    assert.equal(app.input.value, '가지에서 이어갈 초안');
+    assert.equal(app.owner.pendingAttachments[0].attachment, app.image);
+  });
+  test(`${surface}: a fork racing the send restores the exact draft without losing its photo`, async () => {
+    const app = fixture({paneMode});
+    app.respond(() => { throw Object.assign(new Error('원본은 읽기 전용입니다'), {status:409, code:'ROOM_READ_ONLY'}); });
+    await app.submit();
+    assert.equal(app.input.value, '사진을 확인해 줘');
+    assert.equal(app.owner.pendingAttachments[0].attachment, app.image);
+    assert.equal((paneMode ? app.pane.data : app.state.roomData).room.readOnly, true);
+    assert.equal(app.pendingMessages.size, 0);
+    await app.submit(); assert.equal(app.calls.length, 1);
+  });
+  test(`${surface}: a late frozen-source rejection never overwrites another room's draft`, async () => {
+    const app = fixture({paneMode}), response = deferred();
+    app.respond(() => response.promise); const sending = app.submit(); await tick();
+    app.switchRoom('other-room'); app.input.value = '새 대화 초안';
+    const photo = {attachment:{id:'other-photo'}}; app.owner.pendingAttachments = [photo];
+    response.reject(Object.assign(new Error('원본은 읽기 전용입니다'), {status:409, code:'ROOM_READ_ONLY'}));
+    await sending;
+    assert.equal(app.input.value, '새 대화 초안');
+    assert.equal(app.owner.pendingAttachments[0], photo);
+    assert.equal(app.pendingMessages.get(app.roomId).text, '사진을 확인해 줘');
+    assert.equal(app.pendingMessages.get(app.roomId).attachments[0], app.image);
+    assert.equal(app.pendingMessages.get(app.roomId).readOnly, true);
+  });
+}

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
-import {layoutBranches, branchGraphGeometry, branchDisplayName} from '../public/branch-graph.mjs';
+import {layoutBranches, branchGraphGeometry, branchDisplayName, branchFocus, branchEdgeKey} from '../public/branch-graph.mjs';
 
 const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 function functionSource(start, end) {
@@ -57,9 +57,9 @@ function fixture({open = ['a', 'b'], focus = 0} = {}) {
   const runtime = {
     state, els: {roomList}, document: {activeElement: null, createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag)},
     MONITOR_ROOM: 'monitor', showDeletedRooms: false, sidebarState: {roomOrder: []}, sessionSearch: '',
-    layoutBranches, branchGraphGeometry, branchDisplayName, sessionColors: () => new Map(),
+    layoutBranches, branchGraphGeometry, branchDisplayName, branchFocus, branchEdgeKey, sidebarBranchFocus:null, sessionColors: () => new Map(),
     renderAccountTools() {}, updateBranchControls() {}, syncSessionActions() {}, syncSessionColors() {},
-    $: selector => nodes[selector], $$: find, icon: () => new Element('svg'),
+    $: (selector,parent) => parent?find(selector,parent)[0]:nodes[selector], $$: find, icon: () => new Element('svg'),
     closeBotPickers() {}, clearAttachmentDraft() {}, disposeTranscript() {}, applyDockLayout() {}, syncProgressStreams() {},
     refreshExtras() {}, refreshExtra() {}, touchConversation() {}, roomPreferences: () => ({}), composerRecorder: null, toast() {},
     renderExtraPanes() {
@@ -72,7 +72,7 @@ function fixture({open = ['a', 'b'], focus = 0} = {}) {
   vm.runInNewContext([
     functionSource('function currentBranchId(', 'function branchBusy('),
     functionSource('function branchSvg(', 'function inheritSessionTheme('),
-    functionSource('function renderRooms(', 'function openArchivedConversations('),
+    functionSource('function focusSidebarBranch(', 'function openArchivedConversations('),
     functionSource('function sidebarRoomButton(', 'function confirmRemoveConversation('),
     functionSource('function syncSessionActivity(', 'async function refreshSidebarActivity('),
     functionSource('function setLayout(', 'function renderExtraPanes('),
@@ -175,4 +175,24 @@ test('archived conversations expand below the active tree and restore without re
   assert.ok(app.row('old'));
   assert.equal(toggle(),undefined);
   assertSelection(app,['a','b'],'a');
+});
+
+
+test('session and line selection focus their own flow while siblings stay selectable', () => {
+  const app=fixture();app.state.forks=[{id:'b',parent:'a'},{id:'c',parent:'a'},{id:'d',parent:'b'}];app.runtime.renderRooms();
+  app.runtime.focusSidebarBranch('b');
+  const focused=()=>app.rows().filter(row=>row.classList.contains('is-flow-focused')).map(row=>row.dataset.roomId).sort();
+  assert.deepEqual(focused(),['a','b','d']);
+  assert.ok(app.row('c').classList.contains('is-flow-muted'));
+  const hit=descendants(app.runtime.els.roomList).find(node=>node.classList.contains('branch-path-hit')&&node.dataset.roomId==='c');
+  hit.onclick({stopPropagation(){}});
+  assert.deepEqual(focused(),['a','c']);
+  assert.equal(hit.getAttribute('aria-pressed'),'true');
+  const graph=descendants(app.runtime.els.roomList).find(node=>node.classList.contains('branch-graph'));
+  graph.onkeydown({key:'Escape',stopPropagation(){}});
+  assert.equal(app.rows().some(row=>row.classList.contains('is-flow-muted')),false);
+  hit.onkeydown({key:'Enter',preventDefault(){},stopPropagation(){}});
+  assert.deepEqual(focused(),['a','c']);
+  app.runtime.els.roomList.onclick({target:app.runtime.els.roomList});
+  assert.equal(app.rows().some(row=>row.classList.contains('is-flow-muted')),false);
 });

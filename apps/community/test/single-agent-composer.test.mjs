@@ -13,7 +13,7 @@ function setupCatalog({ configured = true } = {}) {
   const runtime = {
     state, sidebarEpoch: 1, MONITOR_ROOM: "monitor", els: { usage: {} },
     api: async () => catalog,
-    renderRooms() {}, voiceUI: { handleLink() {} }, toast: error => errors.push(error),
+    renderRooms() {}, updateModelAvailability() {}, voiceUI: { handleLink() {} }, toast: error => errors.push(error),
   };
   vm.runInNewContext(loadRoomsSource + "\nthis.load = loadRooms;", runtime);
   return { state, errors, load: runtime.load, setCatalog: value => { catalog = value; } };
