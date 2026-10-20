@@ -4,6 +4,9 @@ import { normalizeBotOutput } from "../../model-output.mjs";
 import { usageEvent } from "../../usage.mjs";
 
 const MAX_TEXT = 8000;
+const MAX_USER_TEXT = 48000;
+const DEFAULT_TIMEOUT_MS = 60000;
+const LARGE_ARGUMENT_TOOLS = new Set(['host_exec','create_drawing']);
 
 /**
  * Small server-only adapter for OpenClaw's documented OpenResponses endpoint.
@@ -13,7 +16,7 @@ const MAX_TEXT = 8000;
  * The dedicated Gateway must separately deny its built-in tools.
  */
 export class OpenClawHttpAdapter {
-  constructor({ baseUrl, token, agentId = "default", fetchImpl = fetch, timeoutMs = 20_000, allowPrivateHttp = false } = {}) {
+  constructor({ baseUrl, token, agentId = "default", fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, allowPrivateHttp = false } = {}) {
     if (typeof baseUrl !== "string" || !baseUrl) throw new Error("OpenClaw base URL is required");
     const endpoint = new URL(baseUrl.replace(/\/+$/, "") + "/v1/responses");
     if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
@@ -48,16 +51,21 @@ export class OpenClawHttpAdapter {
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     try {
+      const userText=String(request.user ?? "");
+      // Steering checkpoints include completed side effects. Silently dropping
+      // their tail could make a resumed agent repeat or omit work.
+      if(userText.length>MAX_USER_TEXT) throw new Error('OpenClaw user input exceeds 48000 characters; nothing was submitted');
       const input = [
         ...(request.system ? [{ type: "message", role: "system", content: String(request.system).slice(0, MAX_TEXT) }] : []),
         ...(request.context ? [{ type: "message", role: "developer", content: String(request.context).slice(0, MAX_TEXT) }] : []),
-        { type: "message", role: "user", content: String(request.user ?? "").slice(0, MAX_TEXT) },
+        { type: "message", role: "user", content: userText },
       ];
       const browser = request?.browser;
       const definitions = request.toolDefinitions === undefined ? BROWSER_TOOL_DEFINITIONS : request.toolDefinitions;
       if (!Array.isArray(definitions) || definitions.some((tool) => tool?.type !== "function" || typeof tool.function?.name !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(tool.function.name))) {
         throw new Error("Invalid OpenClaw client tool definitions");
       }
+      const outputTokens=(browser && definitions.length) || request.effort ? 8192 : 4096;
       let actions = 0;
       for (let callCount = 0; callCount < 5; callCount += 1) {
       controller.signal.throwIfAborted();
@@ -69,7 +77,7 @@ export class OpenClawHttpAdapter {
         redirect: "error",
         signal: controller.signal,
         headers: { "content-type": "application/json", authorization: `Bearer ${this.token}`, "x-openclaw-agent-id": this.agentId, "x-openclaw-session-key": sessionKey },
-        body: JSON.stringify({ model: `openclaw/${this.agentId}`, input, max_output_tokens: 512, store: false, tools, tool_choice: tools.length ? "auto" : "none" }),
+        body: JSON.stringify({ model: `openclaw/${this.agentId}`, input, max_output_tokens: outputTokens, store: false, tools, tool_choice: tools.length ? "auto" : "none" }),
       });
       if (!response.ok) {
         request.onUsage?.(usageEvent({provider:"openclaw",keySlot:request.keySlot,model:`openclaw/${this.agentId}`,status:response.status,headers:response.headers}));
@@ -81,12 +89,19 @@ export class OpenClawHttpAdapter {
       finally {
         request.onUsage?.(usageEvent({provider:"openclaw",keySlot:request.keySlot,model:typeof payload?.model==="string"?payload.model:`openclaw/${this.agentId}`,status:response.status,headers:response.headers,usage:payload?.usage}));
       }
+      const refusals=Array.isArray(payload?.output)?payload.output.flatMap(item=>Array.isArray(item?.content)?item.content:[]).filter(part=>part?.type==='refusal'):[];
+      if(refusals.length || payload?.incomplete_details?.reason==='content_filter') {
+        return normalizeBotOutput(refusals.map(part=>typeof part.refusal==='string'?part.refusal:'').join('\n').trim() || '이 요청에 대한 응답은 제공자 정책에 따라 제한되었습니다.');
+      }
+      // A capped response can contain plausible text or valid but incomplete
+      // function arguments. Never expose or execute that partial output.
+      if(payload?.status==='incomplete' || payload?.incomplete_details?.reason==='max_output_tokens') throw new Error('OpenClaw gateway response was incomplete');
       const calls = Array.isArray(payload?.output) ? payload.output.filter((item) => item?.type === "function_call") : [];
       if (calls.length) {
         if (!browser || calls.length > 4 - actions) throw new Error("OpenClaw client tool action budget exceeded");
         if (callCount >= 4 || typeof request.beforeAdditionalModelCall !== "function") throw new Error("OpenClaw continuation quota is unavailable");
         const parsedCalls = calls.map((call) => {
-          if (typeof call.call_id !== "string" || call.call_id.length > 200 || typeof call.name !== "string" || !allowedNames.has(call.name) || typeof call.arguments !== "string" || call.arguments.length > 10000) throw new Error("Invalid OpenClaw client tool call");
+          if (typeof call.call_id !== "string" || call.call_id.length > 200 || typeof call.name !== "string" || !allowedNames.has(call.name) || typeof call.arguments !== "string" || (LARGE_ARGUMENT_TOOLS.has(call.name)?Buffer.byteLength(call.arguments)>32768:call.arguments.length>10000)) throw new Error("Invalid OpenClaw client tool call");
           let args; try { args = JSON.parse(call.arguments); } catch { throw new Error("Invalid OpenClaw client tool arguments"); }
           return { call, args };
         });
@@ -153,7 +168,7 @@ function extractText(payload) {
 export function createOpenClawFromEnv(env = process.env, fetchImpl = fetch) {
   if (!(env.COMMUNITY_OPENCLAW_BASE_URL && env.COMMUNITY_OPENCLAW_TOKEN)) return null;
   const configuredTimeout = env.COMMUNITY_OPENCLAW_TIMEOUT_MS;
-  const timeoutMs = configuredTimeout === undefined || configuredTimeout === "" ? 20_000 : Number(configuredTimeout);
+  const timeoutMs = configuredTimeout === undefined || configuredTimeout === "" ? DEFAULT_TIMEOUT_MS : Number(configuredTimeout);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 180_000) throw new Error("COMMUNITY_OPENCLAW_TIMEOUT_MS must be an integer between 1000 and 180000");
   return new OpenClawHttpAdapter({ baseUrl: env.COMMUNITY_OPENCLAW_BASE_URL, token: env.COMMUNITY_OPENCLAW_TOKEN, agentId: env.COMMUNITY_OPENCLAW_AGENT_ID ?? "default", fetchImpl, timeoutMs, allowPrivateHttp: env.COMMUNITY_OPENCLAW_ALLOW_PRIVATE_HTTP === "1" });
 }

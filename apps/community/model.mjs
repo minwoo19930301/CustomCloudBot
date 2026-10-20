@@ -4,7 +4,16 @@ import { usageEvent } from './usage.mjs';
 
 const MAX_ATTEMPTS_PER_STEP = 8;
 const MAX_CALLS = 32;
+const TEXT_OUTPUT_TOKENS = 4096;
+const WORK_OUTPUT_TOKENS = 8192;
+const TEXT_TIMEOUT_MS = 30000;
+const WORK_TIMEOUT_MS = 60000;
+const LARGE_ARGUMENT_TOOLS = new Set(['host_exec','create_drawing']);
 const RETRYABLE_STATUS = new Set([400,401,402,403,404,408,429,500,502,503,504]);
+const GROQ_DEFAULT_TPM = 8000;
+const GROQ_OUTPUT_CAP = 4096;
+const GROQ_MIN_OUTPUT = 512;
+const GROQ_TOKEN_MARGIN = 256;
 const safeName = value => typeof value === 'string' && /^[\w.:/@+ -]{1,200}$/.test(value) ? value : 'unknown';
 const endpointFor = baseUrl => {
   const endpoint = new URL(String(baseUrl).replace(/\/+$/, '') + '/chat/completions');
@@ -13,6 +22,25 @@ const endpointFor = baseUrl => {
 };
 const responseError = (reason, message) => Object.assign(new Error(message), { responseReason: reason });
 const httpReason = status => status === 429 ? 'rate_limit' : [401,402,403].includes(status) ? 'authentication' : status === 408 ? 'timeout' : status === 400 ? 'invalid_response' : 'unavailable';
+
+function groqOutputBudget(messages, tools, desired, limit) {
+  // Groq reserves prompt + maximum output against TPM before generating. This
+  // byte estimate includes tool schemas and completed tool results, but is not
+  // a tokenizer. A measured TPM 413 below can correct it once without dropping
+  // instructions or tools. Never reserve the entire free-tier 8K as output.
+  const estimatedInput=Math.ceil(Buffer.byteLength(JSON.stringify({messages,...(tools?{tools}:{})}))/3)+128;
+  return Math.max(GROQ_MIN_OUTPUT,Math.min(desired,GROQ_OUTPUT_CAP,limit-estimatedInput-GROQ_TOKEN_MARGIN));
+}
+
+function groqTpmRejection(payload) {
+  const error=payload?.error, message=error?.message;
+  if(typeof message!=='string' || (error.type!=='tokens' && error.code!=='rate_limit_exceeded') ||
+    !/request too large/i.test(message) || !/(?:tokens per minute|\bTPM\b)/i.test(message)) return null;
+  const numbers=/\bLimit\s+([\d,]+)\b[\s\S]{0,100}\bRequested\s+([\d,]+)\b/i.exec(message);
+  const limit=Number(numbers?.[1].replaceAll(',','')), requested=Number(numbers?.[2].replaceAll(',',''));
+  return Number.isSafeInteger(limit) && Number.isSafeInteger(requested) && limit>0 && requested>limit && requested<=1e9
+    ? {limit,requested} : {};
+}
 
 // Hooks and body reads must still stop promptly if a caller neglects the signal.
 function withSignal(promise, signal) {
@@ -26,7 +54,7 @@ function withSignal(promise, signal) {
   });
 }
 
-async function readPayload(response, signal) {
+async function readPayload(response, signal, maxBytes=131072) {
   if(!response.body) throw responseError('empty_response', 'Empty model response');
   const reader=response.body.getReader(), chunks=[];
   let bytes=0;
@@ -35,7 +63,7 @@ async function readPayload(response, signal) {
       const result=await withSignal(reader.read(), signal);
       if(result.done) break;
       bytes+=result.value.byteLength;
-      if(bytes>131072) throw responseError('response_too_large', 'Model response too large');
+      if(bytes>maxBytes) throw responseError('response_too_large', 'Model response too large');
       chunks.push(Buffer.from(result.value));
     }
   } finally {
@@ -47,7 +75,16 @@ async function readPayload(response, signal) {
 }
 
 function validateMessage(payload, useTools, definitions, actions) {
-  const message=payload?.choices?.[0]?.message;
+  const choice=payload?.choices?.[0], message=choice?.message;
+  // Provider safety decisions are final responses, never a reason to try a
+  // different model. Ordinary natural-language refusals follow the normal path.
+  const refusal=typeof message?.refusal==='string' ? message.refusal.trim() : '';
+  if(refusal || choice?.finish_reason==='content_filter') {
+    return {message,output:normalizeBotOutput(refusal || '이 요청에 대한 응답은 제공자 정책에 따라 제한되었습니다.')};
+  }
+  // Even valid JSON can describe an incomplete command. Reject the whole
+  // response before dispatch so a truncated batch has no side effects.
+  if(choice?.finish_reason==='length') throw responseError('incomplete_response', '모델 응답이 출력 길이 제한으로 끝났습니다.');
   if(!message || typeof message!=='object' || Array.isArray(message)) throw responseError('invalid_response', 'Invalid model response');
   if(message.tool_calls != null && !Array.isArray(message.tool_calls)) throw responseError('invalid_response', 'Invalid browser tool call');
   if(message.tool_calls?.length) {
@@ -55,7 +92,8 @@ function validateMessage(payload, useTools, definitions, actions) {
     const allowed=new Set(definitions.map(tool=>tool.function.name)), ids=new Set();
     const calls=message.tool_calls.map(call=>{
       if(!call || typeof call.id!=='string' || !call.id || call.id.length>200 || ids.has(call.id) ||
-        !allowed.has(call.function?.name) || typeof call.function?.arguments!=='string' || call.function.arguments.length>10000) {
+        !allowed.has(call.function?.name) || typeof call.function?.arguments!=='string' ||
+        (LARGE_ARGUMENT_TOOLS.has(call.function.name)?Buffer.byteLength(call.function.arguments)>32768:call.function.arguments.length>10000)) {
         throw responseError('invalid_response', 'Invalid browser tool call');
       }
       ids.add(call.id);
@@ -82,7 +120,9 @@ export class ApiLlm {
   async complete(request, signal) {
     const messages=[{role:'system',content:request.system},{role:'user',content:request.images?.length ? [{type:'text',text:request.user},...request.images.map(image=>({type:'image_url',image_url:{url:image}}))] : request.user}];
     const definitions=request.toolDefinitions || BROWSER_TOOL_DEFINITIONS;
+    const hasTools=Boolean(request.browser) && definitions.length>0;
     const control=request.modelControl;
+    const groqLimits=new Map();
     let actions=0, candidateIndex=0, totalCalls=0, stepCalls=0, callCredit=true, selection;
     let lastReason='start', lastError=new Error('사용 가능한 모델 한도 또는 인증을 확인해 주세요.');
     const syncSelection=()=>{
@@ -103,7 +143,8 @@ export class ApiLlm {
     };
     syncSelection();
     for(let step=0;step<5;step++) {
-      const useTools=Boolean(request.browser) && actions<4 && step<4;
+      const useTools=hasTools && actions<4 && step<4;
+      const sizeRetries=new Map();
       stepCalls=0;
       for(;;) {
         signal?.throwIfAborted();
@@ -132,6 +173,8 @@ export class ApiLlm {
         }
         const candidate=candidates[candidateIndex], active=selection;
         const target=endpointFor(candidate.baseUrl);
+        const isGroq=/^groq$/i.test(candidate.provider || candidate.name || '') || target.hostname==='api.groq.com';
+        const limitKey=JSON.stringify([target.origin,candidate.slot,candidate.model]);
         if(!callCredit) {
           await request.beforeAdditionalModelCall?.();
           callCredit=true;
@@ -141,31 +184,59 @@ export class ApiLlm {
         active.signal?.throwIfAborted();
         if(available && !available(candidate)) { candidateIndex++; continue; }
         const effort=['low','medium','high','xhigh'].includes(choice.effort) ? choice.effort : '';
-        const fetchSignal=AbortSignal.any([AbortSignal.timeout(request.images?.length ? 30000 : 12000),...(signal?[signal]:[]),...(active.signal?[active.signal]:[])]);
+        // Reasoning and generated tool arguments share the completion budget.
+        // Keep this larger budget for the final reply after tool execution too.
+        const workBudget=hasTools || Boolean(effort) || /(?:^|\/)(?:gpt-oss-|deepseek-r1|o[134](?:-|$)|gpt-5(?:[.-]|$))/i.test(candidate.model);
+        const desiredTokens=workBudget?WORK_OUTPUT_TOKENS:request.images?.length?2048:TEXT_OUTPUT_TOKENS;
+        const sizeRetry=sizeRetries.get(candidateIndex);
+        let outputTokens=isGroq?groqOutputBudget(messages,useTools?definitions:null,desiredTokens,groqLimits.get(limitKey) || GROQ_DEFAULT_TPM):desiredTokens;
+        if(sizeRetry?.revision===active.revision) outputTokens=Math.min(outputTokens,sizeRetry.tokens);
+        const fetchSignal=AbortSignal.any([AbortSignal.timeout(workBudget?WORK_TIMEOUT_MS:TEXT_TIMEOUT_MS),...(signal?[signal]:[]),...(active.signal?[active.signal]:[])]);
         totalCalls++;stepCalls++;callCredit=false;
         transition('attempt',candidate,lastReason);
         request.onProgress?.('model',lastReason==='start'?'답변 작성 중':'다른 모델 연결 중');
-        let response,payload,validated,failureReason,failureStatus,failureDelay,failureScope;
+        let response,payload,validated,failureReason,failureStatus,failureDelay,failureScope,retryTokens;
         try {
           response=await fetch(target,{
             method:'POST',redirect:'error',signal:fetchSignal,
             headers:{'content-type':'application/json',authorization:'Bearer '+candidate.apiKey},
-            body:JSON.stringify({model:candidate.model,messages,max_tokens:request.images?.length ? 2048 : 512,
+            body:JSON.stringify({model:candidate.model,messages,max_tokens:outputTokens,
               ...(effort && (!candidate.provider || /openai|groq/.test(candidate.provider)) ? {reasoning_effort:effort}:{}),
               ...(useTools?{tools:definitions,tool_choice:'auto'}:{})}),
           });
+          if(isGroq) {
+            const limit=Number(response.headers.get('x-ratelimit-limit-tokens'));
+            if(Number.isSafeInteger(limit) && limit>0 && limit<=1e9) groqLimits.set(limitKey,limit);
+          }
           if(response.ok) {
             request.onProgress?.('receiving','응답 수신 중');
             payload=await readPayload(response,fetchSignal);
             validated=validateMessage(payload,useTools,definitions,actions);
           } else {
-            void response.body?.cancel().catch(()=>{});
             const status=response.status;
-            if(!RETRYABLE_STATUS.has(status)) throw new Error('Model provider rejected request ('+status+')');
-            failureReason=httpReason(status);failureStatus=status;
-            const raw=response.headers.get('retry-after');
-            failureDelay=raw ? (Number.isFinite(Number(raw)) ? Number(raw)*1000 : Date.parse(raw)-Date.now()) : 0;
-            lastError=new Error('사용 가능한 모델 한도 또는 인증을 확인해 주세요.');
+            let size;
+            if(isGroq && status===413) {
+              try { size=groqTpmRejection(await readPayload(response,fetchSignal,8192)); }
+              catch { fetchSignal.throwIfAborted(); }
+            } else void response.body?.cancel().catch(()=>{});
+            if(size) {
+              failureReason='request_too_large';failureStatus=413;failureScope={scope:'model'};
+              lastError=new Error('이 요청은 모델이 한 번에 처리할 수 있는 토큰 한도를 넘었습니다.');
+              // Requested includes our output reservation. Reduce only that
+              // reservation once; input alone exceeding TPM must fail over.
+              if(size.limit) {
+                groqLimits.set(limitKey,size.limit);
+                const measuredInput=size.requested-outputTokens;
+                const smaller=Math.floor(size.limit-measuredInput-GROQ_TOKEN_MARGIN);
+                if(sizeRetry?.revision!==active.revision && measuredInput>=0 && smaller>=GROQ_MIN_OUTPUT && smaller<outputTokens) retryTokens=smaller;
+              }
+            } else {
+              if(!RETRYABLE_STATUS.has(status)) throw new Error('Model provider rejected request ('+status+')');
+              failureReason=httpReason(status);failureStatus=status;
+              const raw=response.headers.get('retry-after');
+              failureDelay=raw ? (Number.isFinite(Number(raw)) ? Number(raw)*1000 : Date.parse(raw)-Date.now()) : 0;
+              lastError=new Error('사용 가능한 모델 한도 또는 인증을 확인해 주세요.');
+            }
           }
         } catch(error) {
           signal?.throwIfAborted();
@@ -186,6 +257,10 @@ export class ApiLlm {
         if(failureReason) {
           lastReason=failureReason;
           transition('failure',candidate,failureReason);
+          if(retryTokens) {
+            sizeRetries.set(candidateIndex,{revision:active.revision,tokens:retryTokens});
+            continue;
+          }
           (choice.onProviderFailure || request.onProviderFailure)?.(candidate,failureStatus,failureDelay,failureScope);
           candidateIndex++;
           continue;
@@ -201,7 +276,7 @@ export class ApiLlm {
             try { result=await request.browser(call.function.name,call.args,{signal}); }
             catch(error) {
               signal?.throwIfAborted();
-              result='Browser action failed: '+(error.status?error.message:'The page could not complete this action.');
+              result='Tool action failed: '+(error.status?error.message:'The requested tool action could not be completed.');
             }
             messages.push({role:'tool',tool_call_id:call.id,content:String(result).slice(0,8000)});
             signal?.throwIfAborted();

@@ -9,6 +9,13 @@ import {startCommunity} from '../server.mjs';
 const envelope = content => 'SendMessage: ' + JSON.stringify({type: 'text', content});
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=', 'base64');
 
+function currentRequestText(request) {
+  const boundary = '\n\n현재 인증된 사용자의 요청 (아래 현재 요청에 직접 답하세요):\n';
+  const index = request.user.indexOf(boundary);
+  assert.ok(index >= 0, 'the current request must be explicitly separated from preceding history');
+  return request.user.slice(index + boundary.length);
+}
+
 async function until(read, description) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -229,8 +236,8 @@ test('send now preserves the original task, waits for it to settle, suppresses i
   assert.equal(f.model.calls.length, 1, 'aborting the signal does not mean the old operation has actually stopped');
   active.finish('LATE_CANCELLED_REPLY_MARKER');
   const now = await f.model.next(1);
-  assert.match(now.request.user.split('이 방에 공개된 이전 대화')[0], /FIRST_ACTIVE_MARKER/);
-  assert.match(now.request.user.split('이 방에 공개된 이전 대화')[0], /SEND_NOW_MARKER/);
+  assert.match(currentRequestText(now.request), /FIRST_ACTIVE_MARKER/);
+  assert.match(currentRequestText(now.request), /SEND_NOW_MARKER/);
   assert.match(now.request.user, /SEND_NOW_MARKER/);
   assert.doesNotMatch(now.request.user, /OLDER_QUEUED_MARKER|LATE_CANCELLED_REPLY_MARKER/);
   now.finish('send now done');
@@ -255,7 +262,7 @@ test('repeated send-now instructions retain the original request and each preced
   assert.equal((await f.call(`/api/rooms/${id}/queue/${secondSteer.data.queueId}/send-now`, {auth: owner, body: {}})).status, 202);
   f.model.calls[1].finish('discard second late output');
   const continued = await f.model.next(2);
-  const currentRequest = continued.request.user.split('이 방에 공개된 이전 대화')[0];
+  const currentRequest = currentRequestText(continued.request);
   for (const marker of ['ORIGINAL_TASK_MARKER', 'FIRST_STEER_MARKER', 'SECOND_STEER_MARKER']) assert.match(currentRequest, new RegExp(marker));
   assert.ok(currentRequest.indexOf('ORIGINAL_TASK_MARKER') < currentRequest.indexOf('FIRST_STEER_MARKER'));
   assert.ok(currentRequest.indexOf('FIRST_STEER_MARKER') < currentRequest.indexOf('SECOND_STEER_MARKER'));
@@ -278,7 +285,7 @@ for (const scenario of [
   assert.equal(promoted.status, 202); assert.equal(promoted.data.interrupting, true);
   const continued = await f.model.next(1);
   assert.equal(continued.request.isolation.botId, 'bot-creative');
-  const currentRequest = continued.request.user.split('이 방에 공개된 이전 대화')[0];
+  const currentRequest = currentRequestText(continued.request);
   assert.match(currentRequest, /KEEP_ORIGINAL_TASK_MARKER/);
   assert.ok(currentRequest.includes(scenario.text));
   continued.finish('original task with instruction completed');
@@ -302,8 +309,8 @@ test('restart resumes only unstarted queue entries and never replays the operati
   await f.model.next(1);
   await f.restart();
   const resumed = await f.model.next(0);
-  assert.match(resumed.request.user.split('\n\n')[0], /WAITING_RESTART_MARKER/);
-  assert.doesNotMatch(resumed.request.user.split('\n\n')[0], /ALREADY_DISPATCHED_MARKER/);
+  assert.match(currentRequestText(resumed.request), /WAITING_RESTART_MARKER/);
+  assert.doesNotMatch(currentRequestText(resumed.request), /ALREADY_DISPATCHED_MARKER/);
   resumed.finish('resumed once');
   const done = await f.idle(owner, id);
   assert.equal(f.model.calls.length, 1);

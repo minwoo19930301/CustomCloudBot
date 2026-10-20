@@ -16,7 +16,7 @@ test("OpenClaw adapter uses documented OpenResponses shape and isolated server s
   assert.match(captured.init.headers["x-openclaw-session-key"], /^community:[a-f0-9]{64}$/);
   const body = JSON.parse(captured.init.body);
   assert.equal(body.model, "openclaw/community");
-  assert.equal(body.max_output_tokens, 512);
+  assert.equal(body.max_output_tokens, 4096);
   assert.deepEqual(body.tools, []);
   assert.equal(body.tool_choice, "none");
   assert.ok(body.input.every((item) => item.type === "message"));
@@ -41,8 +41,8 @@ test("environment factory stays disabled unless server-only OpenClaw credentials
 
 test("environment factory accepts only a bounded gateway timeout and keeps the default", () => {
   const env = { COMMUNITY_OPENCLAW_BASE_URL:"http://127.0.0.1:18789", COMMUNITY_OPENCLAW_TOKEN:"gateway-secret-token" };
-  assert.equal(createOpenClawFromEnv(env).timeoutMs, 20000);
-  assert.equal(createOpenClawFromEnv({...env,COMMUNITY_OPENCLAW_TIMEOUT_MS:""}).timeoutMs, 20000);
+  assert.equal(createOpenClawFromEnv(env).timeoutMs, 60000);
+  assert.equal(createOpenClawFromEnv({...env,COMMUNITY_OPENCLAW_TIMEOUT_MS:""}).timeoutMs, 60000);
   for (const value of ["1000", "120000", "180000"]) assert.equal(createOpenClawFromEnv({...env,COMMUNITY_OPENCLAW_TIMEOUT_MS:value}).timeoutMs, Number(value));
   for (const value of ["0", "999", "180001", "1000.5", "Infinity", "NaN", "not-a-number", " ", null]) {
     assert.throws(()=>createOpenClawFromEnv({...env,COMMUNITY_OPENCLAW_TIMEOUT_MS:value}),/COMMUNITY_OPENCLAW_TIMEOUT_MS/);

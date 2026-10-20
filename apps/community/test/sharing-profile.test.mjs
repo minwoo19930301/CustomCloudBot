@@ -128,7 +128,8 @@ test("private rooms offer an explicit empty shared copy with isolated tools and 
   await f.send(owner, id, "shared bot request", {botIds: ["bot-analyst"]});
   const response = await fetch(`${f.app.url}/api/rooms/${id}/progress`, {headers: {cookie: owner.cookie}}); await response.text();
   const request = f.calls.find(item => item.isolation?.roomId === id && item.isolation?.botId !== "title");
-  assert.ok(request); assert.deepEqual(request.toolDefinitions, []); assert.equal(request.browser, null);
+  assert.ok(request); assert.deepEqual(request.toolDefinitions.map(tool=>tool.function.name), ["create_drawing"]); assert.equal(typeof request.browser, "function");
+  await assert.rejects(request.browser("read_connected_service", {id:"mail",action:"list"}), error=>error.status===403);
   assert.doesNotMatch(request.user, /PRIVATE_HISTORY_MARKER/); assert.match(request.system, /공동 대화에서는 개인 메일과 캘린더를 조회하지 않습니다/);
 });
 

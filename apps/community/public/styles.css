@@ -532,7 +532,7 @@ button {
   display: block;
   width: min(220px, 55vw);
   max-height: 220px;
-  object-fit: cover;
+  object-fit: contain;
   border-radius: 10px;
   cursor: zoom-in;
 }
