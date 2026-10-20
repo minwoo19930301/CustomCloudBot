@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createProviderPool, formatModelList, publicModels, readProviders } from "../providers.mjs";
+import { createProviderAvailability, createProviderPool, formatModelList, publicModels, readProviders } from "../providers.mjs";
 
 const modelsResponse = (ids, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -222,14 +222,14 @@ test('candidate model eligibility remains specific to each key catalog',async()=
 
 test('model failures cool only that key/model pair, survive catalog refresh and expire',async t=>{
  let now=1000000;t.mock.method(Date,'now',()=>now);
- for(const [status,details] of [[400,undefined],[404,undefined],[502,{scope:'model'}]]){
+ for(const [status,details,duration] of [[400,undefined,60000],[404,undefined,6*3600000],[502,{scope:'model'},60000]]){
   const pool=createProviderPool({GROQ_API_KEY:'one'},async()=>modelsResponse(['openai/gpt-oss-120b','openai/gpt-oss-20b']));
   await pool.listModels();const choice=pool.choose('','');
   choice.onProviderFailure(choice,status,60000,details);
   assert.equal(choice.isCandidateAvailable(choice),false);assert.equal(choice.isCandidateAvailable(choice.attempts[1]),true);
   assert.equal(pool.choose(choice.model,''),null);assert.equal(pool.choose('','').model,'openai/gpt-oss-20b');
   await pool.listModels();assert.equal(pool.choose('','').model,'openai/gpt-oss-20b');
-  now+=60001;assert.equal(choice.isCandidateAvailable(choice),true);assert.equal(pool.choose('','').model,'openai/gpt-oss-120b');
+  now+=duration+1;assert.equal(choice.isCandidateAvailable(choice),true);assert.equal(pool.choose('','').model,'openai/gpt-oss-120b');
  }
 });
 
@@ -295,4 +295,127 @@ test('Gemini display names and missing timestamps survive discovery honestly',as
  assert.deepEqual(published.map(model=>model.id),['gemini-2.5-flash','gemini-2.0-flash']);
  assert.equal(published[0].name,'Gemini 2.5 Flash');assert.equal(published[0].makerId,'google');
  assert.ok(published.every(model=>model.catalogCreatedAt===undefined && model.snapshotDate===undefined));
+});
+
+test('confirmed unsupported models stay excluded across ordinary chats and catalog refresh without blocking other models',async t=>{
+ let now=1000000;t.mock.method(Date,'now',()=>now);
+ const pool=createProviderPool({GROQ_API_KEY:'one'},async()=>modelsResponse(['openai/gpt-oss-120b','openai/gpt-oss-20b']));
+ await pool.listModels();
+ const rejected=pool.choose('','');
+ rejected.onProviderFailure(rejected,400,0,{scope:'model',reason:'unsupported_model'});
+ for(let chat=0;chat<10;chat++) {
+  now+=90000;
+  await pool.listModels();
+  const next=pool.choose('','');
+  assert.equal(next.model,'openai/gpt-oss-20b');
+  assert.equal(rejected.isCandidateAvailable(rejected),false);
+ }
+ now=1000000+6*3600000+1;
+ assert.equal(pool.choose('','').model,'openai/gpt-oss-120b','an unavailable model is eventually probed again');
+});
+
+test('availability follows endpoint and credential through pool rebuilds, slot changes and key replacement',async()=>{
+ const availability=createProviderAvailability();
+ const entry=(baseUrl,apiKey)=>({name:'custom',baseUrl,apiKey});
+ const firstEnv={COMMUNITY_LLM_PROVIDERS:JSON.stringify([
+  entry('https://one.example/v1','bad-key'),entry('https://two.example/v1','good-key'),
+ ])};
+ const fetcher=async()=>modelsResponse(['chosen-chat','other-chat']);
+ const first=createProviderPool(firstEnv,fetcher,{availability});await first.listModels();
+ const firstChoice=first.choose('chosen-chat','');
+ const failed=firstChoice.attempts.find(candidate=>candidate.apiKey==='bad-key');
+ firstChoice.onProviderFailure(failed,404);
+ const rebuilt=createProviderPool({COMMUNITY_LLM_PROVIDERS:JSON.stringify([
+  entry('https://two.example/v1','good-key'),entry('https://one.example/v1','bad-key'),
+  entry('https://one.example/v1','replacement-key'),
+ ])},fetcher,{availability:first.availability});
+ await rebuilt.listModels();
+ assert.equal(rebuilt.availability,availability);
+ assert.deepEqual(new Set(rebuilt.choose('chosen-chat','').attempts.map(candidate=>candidate.apiKey)),
+  new Set(['good-key','replacement-key']));
+ assert.ok(rebuilt.choose('other-chat','').attempts.some(candidate=>candidate.apiKey==='bad-key'));
+ assert.equal(firstChoice.isCandidateAvailable(failed),false,'already-created attempt lists share the same availability state');
+});
+
+test('request size and policy refusals do not mark a key or model unavailable',async()=>{
+ for(const [status,reason] of [[413,'request_too_large'],[400,'context_length'],[403,'content_filter'],[403,'refusal']]) {
+  const pool=createProviderPool({GROQ_API_KEY:'one'},async()=>modelsResponse(['openai/gpt-oss-120b','openai/gpt-oss-20b']));
+  await pool.listModels();const choice=pool.choose('','');
+  choice.onProviderFailure(choice,status,60000,{scope:'model',reason});
+  assert.equal(choice.isCandidateAvailable(choice),true);
+  assert.equal(pool.choose(choice.model,'').model,choice.model);
+ }
+});
+
+test('model timeouts preserve lighter models while network failure and authentication limits apply to the key',async()=>{
+ for(const [status,details,modelOnly] of [
+  [503,{reason:'timeout'},true],[408,{},true],[502,{scope:'model',reason:'incomplete_response'},true],
+  [503,{reason:'network'},false],[429,{scope:'model',reason:'rate_limit'},false],
+  [401,{scope:'model',reason:'authentication'},false],[402,{},false],[403,{},false],
+  [403,{scope:'model',reason:'model_unavailable'},true],
+  [404,{scope:'provider',reason:'endpoint_not_found'},false],
+  [404,{scope:'route'},false],
+  [502,{reason:'empty_response'},true],[502,{reason:'invalid_response'},true],
+ ]) {
+  const pool=createProviderPool({GROQ_API_KEY:'one',GROQ_API_KEY_2:'two'},async()=>modelsResponse(['openai/gpt-oss-120b','openai/gpt-oss-20b']));
+  await pool.listModels();const choice=pool.choose('','');
+  const sibling=choice.attempts.find(candidate=>candidate.slot===choice.slot && candidate.model!==choice.model);
+  const otherKey=choice.attempts.find(candidate=>candidate.slot!==choice.slot && candidate.model===choice.model);
+  choice.onProviderFailure(choice,status,60000,details);
+  assert.equal(choice.isCandidateAvailable(choice),false);
+  assert.equal(choice.isCandidateAvailable(sibling),modelOnly,`${status} ${JSON.stringify(details)}`);
+  assert.equal(choice.isCandidateAvailable(otherKey),true);
+ }
+});
+
+test('transient failures back off across chats and validated success resets only model failure history',async t=>{
+ let now=1000000;t.mock.method(Date,'now',()=>now);
+ const pool=createProviderPool({GROQ_API_KEY:'one'},async()=>modelsResponse(['openai/gpt-oss-120b','openai/gpt-oss-20b']));
+ await pool.listModels();const choice=pool.choose('','');
+ choice.onProviderFailure(choice,502,0,{scope:'model',reason:'invalid_response'});
+ now+=60001;assert.equal(choice.isCandidateAvailable(choice),true);
+ choice.onProviderFailure(choice,502,0,{scope:'model',reason:'invalid_response'});
+ now+=60001;assert.equal(choice.isCandidateAvailable(choice),false,'the second failure waits two minutes');
+ now+=60000;assert.equal(choice.isCandidateAvailable(choice),true);
+ choice.onProviderSuccess(choice);
+ choice.onProviderFailure(choice,502,0,{scope:'model',reason:'invalid_response'});
+ now+=60001;assert.equal(choice.isCandidateAvailable(choice),true,'success reset the backoff');
+ choice.onProviderFailure(choice,429,120000);
+ choice.onProviderSuccess(choice);
+ assert.equal(choice.isCandidateAvailable(choice),false,'a concurrent success cannot erase a key-wide rate limit');
+ now+=120001;assert.equal(choice.isCandidateAvailable(choice),true);
+});
+
+test('billing errors returned as HTTP 429 or compatible 200 envelopes use account cooldown rather than short rate backoff',async t=>{
+ let now=1000000;t.mock.method(Date,'now',()=>now);
+ for(const status of [429,502]) {
+  const availability=createProviderAvailability();
+  const first={baseUrl:'https://fixture.test/v1',apiKey:'key',model:'first'};
+  const sibling={...first,model:'second'},otherKey={...first,apiKey:'other'};
+  availability.markFailure(first,status,0,{scope:'key',reason:'billing'});
+  now+=60001;
+  assert.equal(availability.isAvailable(sibling),false,'other models using the same exhausted budget also wait');
+  assert.equal(availability.isAvailable(otherKey),true);
+  now+=3600000;
+  assert.equal(availability.isAvailable(sibling),true);
+ }
+});
+
+test('a configured model cooldown never hides healthy alternatives on the same custom endpoint',async()=>{
+ const env={COMMUNITY_LLM_PROVIDERS:JSON.stringify([{name:'fixture',baseUrl:'https://fixture.test/v1',apiKey:'key',model:'chat-1'}])};
+ const fetcher=async()=>modelsResponse(['chat-1','chat-2','chat-3','chat-4']);
+ const pool=createProviderPool(env,fetcher);await pool.listModels();
+ const original=pool.choose('','');
+ assert.deepEqual(original.attempts.map(item=>item.model),['chat-1','chat-2','chat-3']);
+ for(const candidate of original.attempts)original.onProviderFailure(candidate,502,0,{scope:'model',reason:'empty_response'});
+ for(const current of [pool,createProviderPool(env,fetcher,{availability:pool.availability})]) {
+  await current.listModels();
+  assert.equal(current.choose('chat-1',''),null);
+  assert.equal(current.choose('chat-4','').model,'chat-4','manual continuation can select the healthy model');
+  assert.deepEqual(current.choose('','').attempts.map(item=>item.model),['chat-4'],'automatic continuation can reach the untried model');
+ }
+ const healthy=pool.choose('chat-4','');
+ healthy.onProviderFailure(healthy,401,0,{scope:'key',reason:'authentication'});
+ assert.equal(pool.choose('chat-4',''),null,'key-wide failures still suppress every candidate');
+ assert.equal(pool.choose('',''),null);
 });

@@ -9,7 +9,7 @@ const WORK_OUTPUT_TOKENS = 8192;
 const TEXT_TIMEOUT_MS = 30000;
 const WORK_TIMEOUT_MS = 60000;
 const LARGE_ARGUMENT_TOOLS = new Set(['host_exec','create_drawing']);
-const RETRYABLE_STATUS = new Set([400,401,402,403,404,408,429,500,502,503,504]);
+const RETRYABLE_STATUS = new Set([400,401,402,403,404,408,413,429,500,502,503,504]);
 const GROQ_DEFAULT_TPM = 8000;
 const GROQ_OUTPUT_CAP = 4096;
 const GROQ_MIN_OUTPUT = 512;
@@ -21,7 +21,51 @@ const endpointFor = baseUrl => {
   return endpoint;
 };
 const responseError = (reason, message) => Object.assign(new Error(message), { responseReason: reason });
-const httpReason = status => status === 429 ? 'rate_limit' : [401,402,403].includes(status) ? 'authentication' : status === 408 ? 'timeout' : status === 400 ? 'invalid_response' : 'unavailable';
+const POLICY_REPLY = '이 요청에 대한 응답은 제공자 정책에 따라 제한되었습니다.';
+const errorCode = value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value) ? value.toLowerCase() : '';
+const POLICY_CODES = new Set(['content_filter','content_policy_violation','policy_violation','policy_refusal','safety','safety_violation','moderation_blocked','moderation_error']);
+const BILLING_CODES = new Set(['insufficient_quota','billing_hard_limit_reached','billing_not_active','organization_usage_limit_exceeded','organization_spend_limit_exceeded','project_spend_limit_exceeded','credit_balance_exhausted','insufficient_credits']);
+const MODEL_CODES = new Set(['invalid_model','model_not_found','model_not_available','unsupported_model','model_decommissioned']);
+const MODEL_ACCESS_CODES = new Set(['model_unavailable','model_permission_blocked_org','model_permission_blocked_project','model_access_denied']);
+const CONTEXT_CODES = new Set(['context_length_exceeded','max_context_length_exceeded','input_too_long','prompt_too_long']);
+
+// Read upstream error bodies only to produce these fixed categories. Never
+// retain their messages, flagged input, raw metadata or credentials in hooks.
+function classifyProviderError(status, payload) {
+  const error=payload?.error;
+  const codes=[errorCode(error?.code),errorCode(error?.type)];
+  const metadata=error?.metadata;
+  const policyMetadata=metadata && typeof metadata==='object' &&
+    (typeof metadata.flagged_input==='string' || Array.isArray(metadata.patterns) ||
+      Array.isArray(metadata.reasons) && metadata.reasons.length>0);
+  const message=typeof error?.message==='string' ? error.message.slice(0,2000) : '';
+  if(codes.some(code=>POLICY_CODES.has(code)) || policyMetadata ||
+    [400,403].includes(status) && /\b(?:content policy|safety policy|moderation|prompt injection)\b/i.test(message)) {
+    return {reason:'policy_refusal',scope:'request',refusal:true};
+  }
+  const billingMetadata=['openrouter_guardrail_budget','openrouter_workspace_budget','openrouter_key_limit'].includes(metadata?.limit_source);
+  if(codes.some(code=>BILLING_CODES.has(code)) || billingMetadata) return {reason:'billing',scope:'key'};
+  if(status===401) return {reason:'authentication',scope:'key'};
+  if(status>=500) return {reason:'provider_error',scope:'provider'};
+  if(status===408) return {reason:'timeout',scope:'model'};
+  if(codes.some(code=>MODEL_CODES.has(code))) return {reason:'unsupported_model',scope:'model'};
+  if(codes.some(code=>MODEL_ACCESS_CODES.has(code))) return {reason:'model_unavailable',scope:'model'};
+  if(codes.some(code=>CONTEXT_CODES.has(code))) return {reason:'context_length',scope:'request'};
+  if(status===413) return {reason:'request_too_large',scope:'request'};
+  if(status===404) return {reason:'endpoint_not_found',scope:'provider'};
+  if(status===402) return {reason:'billing',scope:'key'};
+  if(status===403) return {reason:'authentication',scope:'key'};
+  if(status===429) return {reason:'rate_limit',scope:'key'};
+  return {reason:status===400?'invalid_request':'invalid_response',scope:'model'};
+}
+const failureMessage = reason => ({
+  unsupported_model:'제공자가 이 모델을 지원하지 않습니다.',model_unavailable:'이 계정에서 해당 모델을 사용할 수 없습니다.',
+  endpoint_not_found:'모델 제공자의 연결 주소를 찾지 못했습니다.',authentication:'모델 제공자 계정 인증을 확인해 주세요.',
+  billing:'모델 제공자의 잔액 또는 사용 예산을 확인해 주세요.',rate_limit:'모델 제공자의 사용 한도에 도달했습니다.',
+  provider_error:'모델 제공자 서버에 일시적인 오류가 발생했습니다.',timeout:'모델 응답 대기 시간이 초과되었습니다.',
+  request_too_large:'이 요청은 모델이 한 번에 처리할 수 있는 크기 한도를 넘었습니다.',
+  context_length:'이 요청은 모델의 컨텍스트 길이 한도를 넘었습니다.',invalid_request:'모델이 요청 형식을 처리하지 못했습니다.',
+}[reason] || '모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.');
 
 function groqOutputBudget(messages, tools, desired, limit) {
   // Groq reserves prompt + maximum output against TPM before generating. This
@@ -80,7 +124,7 @@ function validateMessage(payload, useTools, definitions, actions) {
   // different model. Ordinary natural-language refusals follow the normal path.
   const refusal=typeof message?.refusal==='string' ? message.refusal.trim() : '';
   if(refusal || choice?.finish_reason==='content_filter') {
-    return {message,output:normalizeBotOutput(refusal || '이 요청에 대한 응답은 제공자 정책에 따라 제한되었습니다.')};
+    return {message,output:normalizeBotOutput(refusal || POLICY_REPLY)};
   }
   // Even valid JSON can describe an incomplete command. Reject the whole
   // response before dispatch so a truncated batch has no side effects.
@@ -195,7 +239,7 @@ export class ApiLlm {
         totalCalls++;stepCalls++;callCredit=false;
         transition('attempt',candidate,lastReason);
         request.onProgress?.('model',lastReason==='start'?'답변 작성 중':'다른 모델 연결 중');
-        let response,payload,validated,failureReason,failureStatus,failureDelay,failureScope,retryTokens;
+        let response,payload,validated,failureReason,failureStatus,failureDelay,failureScope,retryTokens,successfulResponse=false;
         try {
           response=await fetch(target,{
             method:'POST',redirect:'error',signal:fetchSignal,
@@ -211,16 +255,34 @@ export class ApiLlm {
           if(response.ok) {
             request.onProgress?.('receiving','응답 수신 중');
             payload=await readPayload(response,fetchSignal);
-            validated=validateMessage(payload,useTools,definitions,actions);
+            if(payload?.error && typeof payload.error==='object') {
+              // Some compatible providers return an error envelope after an
+              // HTTP 200. A moderation result is still final in that envelope.
+              const embedded=payload.error.code;
+              failureStatus=Number.isInteger(embedded) && embedded>=400 && embedded<=599?embedded:502;
+              const category=classifyProviderError(failureStatus===embedded?embedded:200,payload);
+              payload=undefined;
+              if(category.refusal) validated={output:normalizeBotOutput(POLICY_REPLY)};
+              else {
+                failureReason=category.reason;failureScope={scope:category.scope,reason:category.reason};
+                lastError=new Error(failureMessage(category.reason));
+              }
+            } else {
+              validated=validateMessage(payload,useTools,definitions,actions);
+              successfulResponse=true;
+            }
           } else {
             const status=response.status;
-            let size;
-            if(isGroq && status===413) {
-              try { size=groqTpmRejection(await readPayload(response,fetchSignal,8192)); }
-              catch { fetchSignal.throwIfAborted(); }
-            } else void response.body?.cancel().catch(()=>{});
-            if(size) {
-              failureReason='request_too_large';failureStatus=413;failureScope={scope:'model'};
+            let category=classifyProviderError(status),size;
+            try {
+              const errorPayload=await readPayload(response,fetchSignal,8192);
+              category=classifyProviderError(status,errorPayload);
+              if(isGroq && status===413 && !category.refusal) size=groqTpmRejection(errorPayload);
+            } catch { fetchSignal.throwIfAborted(); }
+            if(category.refusal) {
+              validated={output:normalizeBotOutput(POLICY_REPLY)};
+            } else if(size) {
+              failureReason='request_too_large';failureStatus=413;failureScope={scope:'request',reason:failureReason};
               lastError=new Error('이 요청은 모델이 한 번에 처리할 수 있는 토큰 한도를 넘었습니다.');
               // Requested includes our output reservation. Reduce only that
               // reservation once; input alone exceeding TPM must fail over.
@@ -231,11 +293,11 @@ export class ApiLlm {
                 if(sizeRetry?.revision!==active.revision && measuredInput>=0 && smaller>=GROQ_MIN_OUTPUT && smaller<outputTokens) retryTokens=smaller;
               }
             } else {
-              if(!RETRYABLE_STATUS.has(status)) throw new Error('Model provider rejected request ('+status+')');
-              failureReason=httpReason(status);failureStatus=status;
+              if(!RETRYABLE_STATUS.has(status) && category.reason!=='context_length') throw new Error('Model provider rejected request ('+status+')');
+              failureReason=category.reason;failureStatus=status;failureScope={scope:category.scope,reason:category.reason};
               const raw=response.headers.get('retry-after');
               failureDelay=raw ? (Number.isFinite(Number(raw)) ? Number(raw)*1000 : Date.parse(raw)-Date.now()) : 0;
-              lastError=new Error('사용 가능한 모델 한도 또는 인증을 확인해 주세요.');
+              lastError=new Error(failureMessage(category.reason));
             }
           }
         } catch(error) {
@@ -243,9 +305,10 @@ export class ApiLlm {
           if(changedSince(active)) continue;
           active.signal?.throwIfAborted();
           if(error.responseReason) {
-            failureReason=error.responseReason;failureStatus=502;failureScope={scope:'model'};lastError=error;
+            failureReason=error.responseReason;failureStatus=502;failureScope={scope:'model',reason:failureReason};lastError=error;
           } else if(error.name==='TimeoutError' || error instanceof TypeError) {
             failureReason=error.name==='TimeoutError'?'timeout':'network';failureStatus=503;
+            failureScope={scope:failureReason==='timeout'?'model':'provider',reason:failureReason};
             lastError=new Error('모든 모델 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.');
           } else throw error;
         } finally {
@@ -264,6 +327,11 @@ export class ApiLlm {
           (choice.onProviderFailure || request.onProviderFailure)?.(candidate,failureStatus,failureDelay,failureScope);
           candidateIndex++;
           continue;
+        }
+        if(successfulResponse) {
+          // A stale, aborted, malformed or rejected response cannot rehabilitate
+          // a model. Availability bookkeeping must not cancel a valid result.
+          try { (choice.onProviderSuccess || request.onProviderSuccess)?.(candidate); } catch {}
         }
         if(validated.calls) {
           // Validate the entire batch before any side effects. Selection changes do

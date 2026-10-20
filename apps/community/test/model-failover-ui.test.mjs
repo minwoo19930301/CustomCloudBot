@@ -99,6 +99,23 @@ test('other users read status but only the requesting user with server permissio
   assert.equal(app.button('auto').getAttribute('aria-pressed'),'true');
 });
 
+test('temporary, account and request notices never claim that the model is unsupported',()=>{
+  const app=setup();
+  for(const [reason,phrase] of [
+    ['authentication','계정 인증'],['billing','사용 예산'],['endpoint','연결 주소'],
+    ['provider','일시적인 오류'],['timeout','응답 시간이 초과'],['size','처리 크기 한도'],
+    ['request','요청 형식'],
+  ]) {
+    app.render({...status,reason});
+    assert.match(app.message().textContent,new RegExp(phrase),reason);
+    assert.match(app.message().textContent,/다음 모델로 이어서 시도/);
+    assert.doesNotMatch(app.message().textContent,/이 모델을 사용할 수 없어/);
+  }
+  app.render({...status,reason:'unavailable'});
+  assert.match(app.message().textContent,/이 모델을 사용할 수 없어/);
+  assert.deepEqual(app.calls,[],'status text alone must not start an extra request');
+});
+
 test('an unanswered notice never pauses or creates a retry; waiting permits an explicit automatic retry',async()=>{
   const app=setup();app.render();await Promise.resolve();app.render();
   assert.deepEqual(app.calls,[]);await app.button('auto').onclick();assert.deepEqual(app.calls,[]);

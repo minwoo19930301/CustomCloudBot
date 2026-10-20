@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import dns from "node:dns/promises";
 import { createBrowserTools, assertSafeUrl, isPrivateAddress, BROWSER_TOOL_DEFINITIONS } from "../browser-tools.mjs";
 
 test("browser URL validation blocks credentials, private DNS, and metadata ranges", async () => {
@@ -64,8 +65,38 @@ function workspaceBrowserFixture(t,{shared=false}={}) {
   if(shared){desktops.sharedRoomId="room";desktops.get=()=>endpoint;desktops.has=()=>true;}
   const tools=createBrowserTools({desktops,fetchImpl:async()=>({ok:true,json:async()=>({webSocketDebuggerUrl:"ws://127.0.0.1:9223/devtools/browser/workspace-test"})}),playwright:{chromium:{connectOverCDP:async()=>{metrics.connections++;return browser;}}}});
   t.after(()=>tools.close());
-  return {tools,calls,metrics,setDimensions:value=>{dimensions=value;},setImage:value=>{image=value;},setCapture:value=>{capture=value;}};
+  return {tools,page,calls,metrics,setDimensions:value=>{dimensions=value;},setImage:value=>{image=value;},setCapture:value=>{capture=value;}};
 }
+
+test("private Vault capture shares the desktop queue and later model snapshots redact submitted credentials", async t => {
+  t.mock.method(dns, "lookup", async () => [{address:"93.184.216.34"}]);
+  const f=workspaceBrowserFixture(t,{shared:true}),username="private-login-fixture@example.com",password="private-password-fixture";
+  let release,captures=0,filled;
+  const wait=new Promise(resolve=>{release=resolve;});
+  f.setCapture(()=>wait);
+  f.page.evaluateHandle=async()=>{
+    captures++;
+    return {evaluate:async(_callback,args)=>{
+      if(args){filled=args;return {status:"filled",nextStep:"submit"};}
+      return {href:f.page.url(),origin:"https://example.com"};
+    },dispose:async()=>{}};
+  };
+  f.page.locator=()=>({elementHandles:async()=>[],evaluate:async()=>`Page echoed ${username} and ${password}`});
+  const frame=f.tools.frame("room-A");
+  await new Promise(resolve=>setImmediate(resolve));
+  const capturing=f.tools.captureLoginTarget("room-B");
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(captures,0,"login target capture must wait for the same shared PC queue");
+  release(Buffer.from([0xff,0xd8,0xff,0xd9]));await frame;
+  const target=await capturing;
+  const result=await f.tools.fillLogin({roomId:"room-B",...target,username,password,authorize:async()=>{}});
+  assert.deepEqual(result,{status:"filled",nextStep:"submit"});
+  assert.equal(filled.password,password);
+  const snapshot=await f.tools.execute("room-A","browser_snapshot");
+  assert.ok(!snapshot.includes(username));assert.ok(!snapshot.includes(password));
+  assert.match(snapshot,/비공개 로그인 정보/);
+  assert.ok(BROWSER_TOOL_DEFINITIONS.every(tool=>!["captureLoginTarget","fillLogin"].includes(tool.function.name)));
+});
 
 test("workspace navigation rejects private and non-web targets before operating the page",async t=>{
   const f=workspaceBrowserFixture(t);

@@ -30,3 +30,8 @@ node_modules
 **/setup-vault.json
 **/setup-vault.key
 **/setup-vault.json.*.tmp
+
+# Website login accounts are private runtime data.
+**/browser-login-vault.json
+**/browser-login-vault.key
+**/browser-login-vault.json.*.tmp

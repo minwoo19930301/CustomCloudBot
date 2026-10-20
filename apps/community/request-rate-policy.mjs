@@ -6,6 +6,7 @@ const POLL_PATHS = new Set([
   '/api/notifications',
   '/api/notifications/settings',
   '/api/sidebar',
+  '/api/browser-logins',
 ]);
 // These routes already apply their own authenticated workspace/mobile limits.
 // Preserve the server's existing exemption, including subroutes and methods.

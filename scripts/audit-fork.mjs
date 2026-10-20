@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 const EXAMPLE=/(?:^|[/. _-])(?:example|sample|template)(?:[/. _-]|$)/i;
 const FIXTURE=/(?:^|\/)(?:fixtures?|__fixtures__)(?:\/|$)/i;
 const PRIVATE_DIR=/(?:^|\/)(?:\.openclaw-private|\.oci|\.ssh|secrets|vault)(?:\/|$)/i;
-const PRIVATE_NAME=/^(?:private-integrations|integrations|credentials|deployment|setup-vault)\.json$|^(?:BUSINESS_CONTEXT|agent-context)\.md$/i;
+const PRIVATE_NAME=/^(?:private-integrations|integrations|credentials|deployment|setup-vault|browser-login-vault)\.json(?:\.[a-f0-9-]+\.tmp)?$|^(?:BUSINESS_CONTEXT|agent-context)\.md$/i;
 const PRIVATE_KEY=/\.(?:pem|key|p12|pfx)$/i;
 const PRIVATE_ENV=/^\.env(?:\.|$)/;
 const PEM=/-----BEGIN (?:(?:RSA|EC|OPENSSH|ENCRYPTED) )?PRIVATE KEY-----\r?\n[A-Za-z0-9+/=]{20,}/;

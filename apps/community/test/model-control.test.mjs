@@ -94,7 +94,24 @@ test('published status contains only display metadata and copies cannot mutate l
   }
   const snapshot=control.status;snapshot.phase='forged';events.at(-1).phase='forged';
   assert.equal(control.status.phase,'trying');assert.equal(control.status.model,'bmodel/b');
-  assert.equal(control.status.reason,'unavailable');assert.deepEqual(events.map(event=>event.sequence),[1,2]);
+  assert.equal(control.status.reason,'authentication');assert.deepEqual(events.map(event=>event.sequence),[1,2]);
+  control.finish('complete');
+});
+
+test('failure reasons distinguish unsupported models from temporary, account and request failures',()=>{
+  const {control}=fixture();
+  for(const [reason,expected] of [
+    ['unsupported_model','unavailable'],['model_unavailable','unavailable'],['endpoint_not_found','endpoint'],
+    ['provider_error','provider'],['authentication','authentication'],['billing','billing'],
+    ['rate_limit','limit'],['timeout','timeout'],['network','connection'],
+    ['context_length','size'],['request_too_large','size'],['incomplete_response','response'],
+    ['invalid_request','request'],['private rate_limit secret','connection'],
+  ]) {
+    control.onTransition({stage:'failure',reason});
+    assert.equal(control.status.reason,expected,reason);
+    control.onTransition({stage:'attempt',model:'fallback',provider:'fixture',attempt:2});
+    assert.equal(control.status.reason,expected,'the actual next attempt retains the fixed cause');
+  }
   control.finish('complete');
 });
 

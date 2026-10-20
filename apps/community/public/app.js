@@ -21,6 +21,7 @@ import { createRoutineUI } from "/routines.js";
 import { createVoiceCall } from "/voice-call.js";
 import { createMessageQueue } from "/message-queue.js";
 import { createModelFailoverUI } from "/model-failover.mjs";
+import { createLoginRequestUI } from "/browser-logins.mjs";
 import { pasteComposerImages, uploadAttachmentFiles, clearAttachmentDraft, removeAttachmentDraft } from "/composer-attachments.mjs";
 import { suggestTopicSwitch } from "/topic-switch.mjs";
 const inviteLinks = createInviteLinks();
@@ -60,6 +61,9 @@ let routineUI;
 let voiceUI;
 let messageQueueUI;
 let modelFailoverUI;
+let loginUI;
+let loginPollBusy = false;
+let loginPollEpoch = 0;
 let composerSuggestions;
 const topicPrompts = new Set();
 const pendingMessages = new Map();
@@ -266,6 +270,7 @@ function showAuth() {
   resetSidebarState();
   modelChanges.clear();
   modelFailoverUI?.reset();
+  loginPollEpoch++; loginPollBusy=false; loginUI?.reset();
   cancelActiveRecording();
   pwaUI?.setSession(null);
   els.auth.classList.remove("is-hidden");
@@ -840,6 +845,7 @@ function showEmpty() {
   closeComposerPicker();
   clearPendingAttachments();
   state.selectedRoom = null;
+  loginUI?.reset();
   state.roomData = null;
   state.extra.forEach(pane => clearAttachmentDraft(pane)); state.extra = []; state.layout = 1; state.focusPane = 0;
   $$(".extra-pane").forEach(pane => { disposeTranscript(pane.querySelector(".message-list")); pane._desktop?.destroy(); pane.remove(); });
@@ -863,6 +869,7 @@ async function selectRoom(id) {
     if (pane.roomId === id) { clearAttachmentDraft(pane); pane.roomId = previous && previous !== id ? previous : null; }
   });
   state.selectedRoom = id;
+  loginPollEpoch++; loginPollBusy=false; loginUI?.sync([]);
   focusSidebarBranch(id);
   $("#message-input").disabled=state.sending;
   notificationUI?.markRoomRead(id);
@@ -1008,12 +1015,26 @@ async function refreshSidebarActivity() {
   } catch { /* The next normal poll retries; unavailable status is not a chat error. */ }
   finally {state.activityBusy=false;}
 }
+async function refreshBrowserLogins() {
+  const actor=state.session?.user,roomId=currentBranchId(),epoch=loginPollEpoch;
+  if(!actor?.hostAdmin || !roomId) { loginUI?.reset(); return; }
+  if(loginPollBusy)return;
+  loginPollBusy=true;
+  try {
+    const data=await api("/api/browser-logins");
+    if(epoch!==loginPollEpoch || actor.id!==state.session?.user?.id || roomId!==currentBranchId())return;
+    loginUI?.sync(data.requests);
+  } catch { /* A normal poll retries without putting private errors in chat. */ }
+  finally { if(epoch===loginPollEpoch)loginPollBusy=false; }
+}
 function startPolling() {
   if (state.pollTimer) clearInterval(state.pollTimer);
+  void refreshBrowserLogins();
   state.pollTimer = setInterval(() => {
     refreshRoom();
     refreshExtras();
     void refreshSidebarActivity();
+    void refreshBrowserLogins();
   }, 3000);
 }
 function stopPolling() {
@@ -2328,6 +2349,7 @@ function renderExtraPanes() {
     const focusBranchPane = () => {
       if(state.focusPane===index+1)return;
       state.focusPane = index + 1;
+      loginPollEpoch++; loginPollBusy=false; loginUI?.sync([]); void refreshBrowserLogins();
       $("#room-view").classList.remove("is-focus");
       $$(".extra-pane").forEach((item, itemIndex) => item.classList.toggle("is-focus", itemIndex + 1 === state.focusPane));
       renderRooms();
@@ -2631,11 +2653,12 @@ function bind() {
   });
   $("#room-view").addEventListener("focusin", () => {
     if(state.focusPane===0)return;state.focusPane=0;desktopUI?.setRoom(state.selectedRoom);
+    loginPollEpoch++; loginPollBusy=false; loginUI?.sync([]); void refreshBrowserLogins();
     $("#room-view").classList.add("is-focus");$$(".extra-pane").forEach(pane=>pane.classList.remove("is-focus"));renderRooms();
   });
   $("#room-view").addEventListener("mousedown", () => {
     if (state.layout < 2) return;
-    state.focusPane = 0;
+    if(state.focusPane!==0) {state.focusPane=0; loginPollEpoch++; loginPollBusy=false; loginUI?.sync([]); void refreshBrowserLogins();}
     desktopUI?.setRoom(state.selectedRoom);
     $("#room-view").classList.add("is-focus");
     $$(".extra-pane").forEach((pane) => pane.classList.remove("is-focus"));
@@ -2780,6 +2803,20 @@ messageQueueUI = createMessageQueue({api, getSession:()=>state.session, toast, o
   state.extra.forEach((pane,index)=>{if(pane.roomId===roomId)tasks.push(refreshExtra(index));});
   await Promise.all(tasks);
 }});
+const loginPendingButton = $("#browser-login-pending");
+loginUI = createLoginRequestUI({api,toast,
+  getContext:()=>({userId:state.session?.user?.id,roomId:currentBranchId(),isOwner:state.session?.user?.hostAdmin===true}),
+  onPendingChange:({count,request})=>{
+    const button=loginPendingButton;
+    if(!button)return;
+    const pane=state.focusPane>0?$$(".extra-pane")[state.focusPane-1]:$("#room-view");
+    pane?.querySelector("form.composer,form.pane-composer")?.before(button);
+    button.hidden=!count;
+    button.textContent=request ? `Vault에서 로그인 · ${new URL(request.origin).hostname}` : "Vault에서 로그인";
+    button.onclick=()=>loginUI.open(request?.id);
+  },
+  onResolved:()=>{void refreshBrowserLogins();},
+});
 modelFailoverUI = createModelFailoverUI({api,getSession:()=>state.session,toast,
   onRefresh:async roomId=>{
     const tasks=[];

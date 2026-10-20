@@ -2,6 +2,7 @@
 // explicit user choices; a poll or an unanswered notice never starts a request.
 const PHASES = new Set(['switching', 'trying', 'waiting', 'exhausted', 'stopped']);
 const TERMINAL = new Set(['exhausted', 'stopped']);
+const REASONS = new Set(['limit','connection','response','switch','unavailable','authentication','billing','endpoint','provider','timeout','size','request']);
 
 function normalizedStatus(value) {
   if (!value || typeof value.runId !== 'string' || !value.runId || !PHASES.has(value.phase)) return null;
@@ -11,7 +12,7 @@ function normalizedStatus(value) {
     userId: value.userId,
     phase: value.phase,
     model: typeof value.model === 'string' ? value.model.replace(/[\p{Cc}\p{Bidi_Control}]/gu, '').trim().slice(0, 120) : '',
-    reason: ['limit', 'connection', 'response', 'switch', 'unavailable'].includes(value.reason) ? value.reason : 'response',
+    reason: REASONS.has(value.reason) ? value.reason : 'response',
     automatic: value.automatic === true,
     canControl: value.canControl === true,
   };
@@ -25,8 +26,14 @@ function notice(status) {
   // only after the server confirms an actual attempt has started.
   if (status.phase === 'switching') return '응답을 이어갈 모델을 바꾸고 있어요.';
   if (status.reason === 'switch') return `${status.model || '선택한 모델'}로 이어서 시도하고 있어요.`;
-  const reason = status.reason === 'limit' ? '모델 사용 한도에 도달해' : status.reason === 'connection' ? '모델 연결이 원활하지 않아' :
-    status.reason === 'unavailable' ? '이 모델을 사용할 수 없어' : '모델 응답을 받지 못해';
+  const reason = {
+    limit:'모델 사용 한도에 도달해', connection:'모델 연결이 원활하지 않아',
+    authentication:'제공자 계정 인증에 문제가 있어', billing:'제공자 잔액 또는 사용 예산이 부족해',
+    unavailable:'이 모델을 사용할 수 없어', endpoint:'제공자 연결 주소를 찾지 못해',
+    provider:'제공자 서버에 일시적인 오류가 있어', timeout:'모델 응답 시간이 초과되어',
+    size:'이 요청이 모델의 처리 크기 한도를 넘어', request:'모델이 요청 형식을 처리하지 못해',
+    response:'모델 응답을 받지 못해',
+  }[status.reason] || '모델 응답을 받지 못해';
   return `${reason} ${status.model || '다른 모델'}로 이어서 시도하고 있어요.`;
 }
 

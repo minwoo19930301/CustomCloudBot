@@ -1,6 +1,7 @@
 import dns from "node:dns/promises";
 import net from "node:net";
 import { readCdpVersion } from "./cdp.mjs";
+import { createBrowserLogin } from "./browser-login.mjs";
 
 const MAX_TEXT = 8000;
 const MAX_SCREENSHOT = 2 * 1024 * 1024;
@@ -51,6 +52,12 @@ export async function assertSafeUrl(value, lookup = dns.lookup) {
 }
 
 const clipped = (value, max = MAX_TEXT) => String(value || "").slice(0, max);
+const privateSnapshot = (session, value) => {
+  let result = value;
+  for (const secret of [...(session.loginSecrets || [])].sort((a, b) => b.length - a.length))
+    result = result.replaceAll(secret, "[비공개 로그인 정보]");
+  return result;
+};
 function browserEndpoint(endpoint) {
   const base = typeof endpoint === "string" ? endpoint : endpoint?.cdpUrl;
   if (!base) return null;
@@ -148,7 +155,7 @@ export function createBrowserTools({ desktops, playwright, fetchImpl } = {}) {
     session.generation++;
     const body = clipped(await page.locator("body").evaluate(node => node.innerText.slice(0,5000)).catch(() => ""), 5000);
     const lines = [...refs.values()].map((e, i) => `[${id}-${i}] ${e.tag}${e.type ? ` type=${e.type}` : ""}${e.href ? ` href=${e.href}` : ""} ${e.text}`);
-    return clipped(`[UNTRUSTED BROWSER SNAPSHOT]\n${body}\nInteractive elements:\n${lines.join("\n")}`);
+    return clipped(privateSnapshot(session, `[UNTRUSTED BROWSER SNAPSHOT]\n${body}\nInteractive elements:\n${lines.join("\n")}`));
   };
   const run = async (roomId, name, args = {}, { signal } = {}) => {
     if (signal?.aborted) throw fail(499, "Browser action cancelled");
@@ -181,6 +188,18 @@ export function createBrowserTools({ desktops, playwright, fetchImpl } = {}) {
     });
     queues.set(key,tracked);return current;
   };
+  const logins = createBrowserLogin({
+    enqueue, pageFor, assertSafeUrl,
+    redact(session, values) {
+      const secrets = new Set([...(session.loginSecrets || []), ...values.filter(Boolean)]);
+      if (secrets.size > 256) throw fail(409, "Browser login limit reached");
+      session.loginSecrets = secrets;
+    },
+    async invalidate(session) {
+      await Promise.all([...session.refs.values()].map(item => item.handle?.dispose?.().catch?.(() => {})));
+      session.refs.clear(); session.generation++;
+    },
+  });
   const execute = (roomId, name, args = {}, options = {}) => {
     if (options.signal?.aborted) return Promise.reject(fail(499, "Browser action cancelled"));
     return enqueue(roomId,()=>run(roomId,name,args,options));
@@ -228,6 +247,6 @@ export function createBrowserTools({ desktops, playwright, fetchImpl } = {}) {
     return {ok:true};
   });
   const screenshot = roomId => enqueue(roomId,async () => { const { page } = await pageFor(roomId); const png = await page.screenshot({ type: "png", fullPage: false, animations: "disabled", timeout: ACTION_TIMEOUT }); if (png.length > MAX_SCREENSHOT) throw fail(413, "Browser screenshot is too large"); return png; });
-  const close = async () => { await Promise.all([...queues.values()].map((q) => q.catch(() => {}))); await Promise.all([...connecting.values()].map((q) => q.catch(() => {}))); await Promise.all([...sessions.values()].map(async (s) => { await s.context.unroute("**/*", s.route).catch(() => {}); if (s.context.unrouteWebSocket) await s.context.unrouteWebSocket("**/*", s.socketRoute).catch(() => {}); for (const cdp of s.cdpSessions.values()) await cdp.detach?.().catch?.(() => {}); for (const item of s.refs.values()) await item.handle?.dispose?.().catch?.(() => {}); await s.browser.close().catch(() => {}); })); sessions.clear(); queues.clear(); queueDepth.clear(); frames.clear(); connecting.clear(); };
-  return { configured: (roomId) => desktops.has(roomId), execute, screenshot, frame, action, close };
+  const close = async () => { await Promise.all([...queues.values()].map((q) => q.catch(() => {}))); await logins.close(); await Promise.all([...connecting.values()].map((q) => q.catch(() => {}))); await Promise.all([...sessions.values()].map(async (s) => { await s.context.unroute("**/*", s.route).catch(() => {}); if (s.context.unrouteWebSocket) await s.context.unrouteWebSocket("**/*", s.socketRoute).catch(() => {}); for (const cdp of s.cdpSessions.values()) await cdp.detach?.().catch?.(() => {}); for (const item of s.refs.values()) await item.handle?.dispose?.().catch?.(() => {}); await s.browser.close().catch(() => {}); })); sessions.clear(); queues.clear(); queueDepth.clear(); frames.clear(); connecting.clear(); };
+  return { configured: (roomId) => desktops.has(roomId), execute, screenshot, frame, action, ...logins, close };
 }

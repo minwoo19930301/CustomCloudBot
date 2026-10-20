@@ -40,7 +40,7 @@ test('invalid, empty, oversized and empty-envelope 200 responses fail over and a
   assert.equal(charged,5);
   assert.equal(usage.length,6);
   assert.ok(usage.every(event=>event.status===200));
-  assert.deepEqual(failures.map(([,status,,scope])=>[status,scope]),Array.from({length:5},()=>[502,{scope:'model'}]));
+  assert.deepEqual(failures.map(([,status,,scope])=>[status,scope]),['invalid_response','invalid_response','empty_response','response_too_large','empty_response'].map(reason=>[502,{scope:'model',reason}]));
   assert.deepEqual(events.filter(event=>event.stage==='failure').map(event=>event.reason),['invalid_response','invalid_response','empty_response','response_too_large','empty_response']);
   assert.deepEqual(events.filter(event=>event.stage==='attempt').map(event=>event.attempt),[1,2,3,4,5,6]);
   assert.deepEqual(events.at(-1),{stage:'finish',model:'f',provider:'groq',attempt:6,reason:'complete'});

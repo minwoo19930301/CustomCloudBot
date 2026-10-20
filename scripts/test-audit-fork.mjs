@@ -13,11 +13,12 @@ async function fixture(t,files) {
 }
 test('private files are rejected while synthetic fixtures and empty examples are allowed',async t=>{
   const files={'ops/key.pem':'material','ops/credentials.json':'{}','.env.production':'X=1',
+    'ops/browser-login-vault.json':'encrypted-data','ops/browser-login-vault.json.1234.tmp':'encrypted-data',
     'BUSINESS_CONTEXT.md':'private details','agent-context.md':'operator context','.openclaw-private/state.json':'{}',
     'tests/fixtures/key.pem':'synthetic fixture','apps/.env.example':'API_KEY=\nTOKEN=""\nPORT=8787\n',
     'integrations.example.json':JSON.stringify({NAVER_MAIL_USERNAME:'',NAVER_MAIL_PASSWORD:'',FAL_KEY:''})};
   const root=await fixture(t,files),findings=await auditFiles(root,Object.keys(files));
-  assert.equal(findings.length,6);assert.ok(findings.every(finding=>finding.rule==='Operator private file must not be tracked'));
+  assert.equal(findings.length,8);assert.ok(findings.every(finding=>finding.rule==='Operator private file must not be tracked'));
 });
 test('nonempty example credentials are detected without leaking their values',async t=>{
   const secret='synthetic-sensitive-value';

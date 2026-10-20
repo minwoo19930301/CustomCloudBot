@@ -1,4 +1,5 @@
 import { catalogModelMetadata, sortModelsNewest } from "./public/model-catalog.mjs";
+import { createHash } from "node:crypto";
 
 export const EFFORTS = ["low", "medium", "high", "xhigh"];
 const validModel = (value) => typeof value === "string" && /^[\w.:/@+-]{1,200}$/.test(value) ? value : "";
@@ -91,12 +92,67 @@ export function readProviders(env) {
   return providers;
 }
 
-export function createProviderPool(env = {}, fetchImpl = fetch) {
+/** Keep request failures across catalog refreshes and pool rebuilds in one
+ * server process. Nothing is global or written to disk; identity follows the
+ * endpoint + credential, so slot reordering and key replacement are safe. */
+export function createProviderAvailability() {
+  const keys=new Map(), models=new Map();
+  const DAY=86400000, HOUR=3600000, MAX_RECORDS=2048;
+  const credentialKey=candidate=>typeof candidate?.baseUrl==="string" && typeof candidate?.apiKey==="string"
+    ? createHash("sha256").update(candidate.baseUrl.replace(/\/+$/,"")+"\n"+candidate.apiKey).digest("hex") : null;
+  const modelKey=(candidate,key)=>key && validModel(candidate?.model) ? key+":"+candidate.model : null;
+  const prune=(records,now)=>{
+    for(const [key,record] of records)if(record.until<=now && now-record.lastFailure>DAY)records.delete(key);
+    while(records.size>MAX_RECORDS)records.delete(records.keys().next().value);
+  };
+  return {
+    isAvailable(candidate) {
+      const key=credentialKey(candidate);
+      if(!key)return false;
+      const now=Date.now();
+      return (keys.get(key)?.until || 0)<=now && (models.get(modelKey(candidate,key))?.until || 0)<=now;
+    },
+    markFailure(candidate,status,retryAfter,details={}) {
+      const key=credentialKey(candidate);
+      if(!key)return;
+      const reason=typeof details?.reason==="string"?details.reason:"";
+      // These describe this prompt, not the credential/model's availability.
+      // The current attempt loop already advances to the next candidate.
+      if(status===413 || ["request_too_large","context_length","content_filter","refusal","policy_refusal"].includes(reason))return;
+      const endpointUnavailable=["endpoint_not_found","endpoint_unavailable"].includes(reason) ||
+        status===404 && ["route","provider"].includes(details?.scope);
+      const unavailable=["unsupported_model","model_unavailable","model_not_found"].includes(reason) || status===404 && !endpointUnavailable;
+      const credentialFailure=([401,402,403,429].includes(status) || ["authentication","billing","rate_limit"].includes(reason)) && !unavailable;
+      const modelOnly=!credentialFailure && !endpointUnavailable && (unavailable || status===400 || status===408 || details?.scope==="model" ||
+        ["timeout","incomplete_response","empty_response","invalid_response","response_too_large"].includes(reason));
+      const records=modelOnly?models:keys, target=modelOnly?modelKey(candidate,key):key;
+      if(!target)return;
+      const now=Date.now(), previous=records.get(target);
+      const count=previous && now-previous.lastFailure<DAY ? Math.min(previous.count+1,8) : 1;
+      // A confirmed missing model is not worth probing on every chat. Ordinary
+      // invalid responses/timeouts remain recoverable, with bounded backoff.
+      const base=unavailable||endpointUnavailable?6*HOUR:[401,402,403].includes(status)||["authentication","billing"].includes(reason)?HOUR:60000;
+      const ceiling=unavailable||endpointUnavailable||credentialFailure?DAY:15*60000;
+      const delay=Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter : 0;
+      const duration=Math.min(DAY,Math.max(30000,Math.min(ceiling,base*2**(count-1)),delay));
+      records.delete(target);
+      records.set(target,{until:Math.max(previous?.until || 0,now+duration),count,lastFailure:now});
+      prune(keys,now);prune(models,now);
+    },
+    markSuccess(candidate) {
+      const key=credentialKey(candidate);
+      if(!key)return;
+      models.delete(modelKey(candidate,key));
+      // A concurrent earlier success must not erase a later key-wide rate
+      // limit/authentication failure affecting the other queued requests.
+    },
+  };
+}
+
+export function createProviderPool(env = {}, fetchImpl = fetch, {availability=createProviderAvailability()} = {}) {
   const providers = readProviders(env);
   const catalogs = new Map();
   let cursor = 0;
-  const cooldowns = new Map();
-  const modelCooldowns = new Map();
   let lastListed = 0;
   let pending;
   const configuredModel = (provider) => validModel(provider.model || env[provider.name.toUpperCase() + "_MODEL"] || env.COMMUNITY_LLM_MODEL);
@@ -167,18 +223,17 @@ export function createProviderPool(env = {}, fetchImpl = fetch) {
   function choose(modelId, effort) {
     const selected = validModel(modelId);
     if (modelId && !selected) return null;
-    const now = Date.now();
-    for (const cache of [cooldowns, modelCooldowns]) for (const [key, until] of cache) if (until <= now) cache.delete(key);
-    const modelKey = candidate => candidate.slot + ":" + candidate.model;
-    const isCandidateAvailable = candidate => (cooldowns.get(candidate.slot) || 0) <= Date.now() && (modelCooldowns.get(modelKey(candidate)) || 0) <= Date.now();
+    const isCandidateAvailable = candidate => availability.isAvailable(candidate);
     const groups = new Map();
     for (const provider of providers) {
-      if ((cooldowns.get(provider.slot) || 0) > now) continue;
       const listed = catalogs.get(provider.slot);
       let ids = selected ? (listed?.has(selected) ? [selected] : []) : [...(listed || [])].filter(id => !NON_CHAT_MODEL.test(id));
       // OpenRouter auto mode never silently selects a paid model.
       if (!selected && provider.name === "openrouter") ids = ids.filter(id => id.endsWith(":free") || id === "openrouter/free");
-      ids = ids.filter(model => isCandidateAvailable({slot:provider.slot, model}));
+      // The configured model is a preference, not the whole endpoint's health.
+      // Evaluate key + exact candidate here; a failed configured model must not
+      // hide healthy alternatives on that same connection.
+      ids = ids.filter(model => isCandidateAvailable({...provider, model}));
       if (!ids.length) continue;
       // Distinct custom endpoints are separate routes even if their display
       // provider names match. Extra keys for one endpoint share a route.
@@ -214,14 +269,10 @@ export function createProviderPool(env = {}, fetchImpl = fetch) {
     for (const route of routes) attempts.push(...route.duplicates);
     attempts.length = Math.min(attempts.length, 8);
     const choice = attempts[0];
-    return {...choice, automatic:!selected, attempts, isCandidateAvailable, onProviderFailure: (candidate, status, retryAfter, details = {}) => {
-      const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 60000;
-      const duration = status === 401 || status === 403 ? 3600000 : Math.max(30000, Math.min(3600000, wait));
-      const modelOnly = ![401,402,403,429].includes(status) && ([400,404].includes(status) || details?.scope === "model");
-      (modelOnly ? modelCooldowns : cooldowns).set(modelOnly ? modelKey(candidate) : candidate.slot, Date.now() + duration);
-    }};
+    return {...choice, automatic:!selected, attempts, isCandidateAvailable,
+      onProviderFailure: availability.markFailure, onProviderSuccess: availability.markSuccess};
   }
-  return { providers, listModels, ensureModels, choose, get configured() { return providers.length > 0; } };
+  return { providers, listModels, ensureModels, choose, availability, get configured() { return providers.length > 0; } };
 }
 
 export function publicModels(listed) {

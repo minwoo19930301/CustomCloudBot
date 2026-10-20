@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
-const reasonFor = value => /rate_limit|limit/.test(value || '') ? 'limit' :
-  /authentication|unavailable/.test(value || '') ? 'unavailable' :
-  /response/.test(value || '') ? 'response' : value === 'switched' ? 'switch' : 'connection';
+const PUBLIC_REASONS = new Map([
+  ['rate_limit','limit'],['authentication','authentication'],['billing','billing'],
+  ['unsupported_model','unavailable'],['model_unavailable','unavailable'],['model_not_found','unavailable'],
+  ['endpoint_not_found','endpoint'],['endpoint_unavailable','endpoint'],['provider_error','provider'],
+  ['timeout','timeout'],['request_too_large','size'],['context_length','size'],
+  ['invalid_request','request'],['invalid_response','response'],['empty_response','response'],
+  ['incomplete_response','response'],['response_too_large','response'],['switched','switch'],
+]);
+const reasonFor = value => PUBLIC_REASONS.get(value) || 'connection';
 const safeName = value => typeof value === 'string' ? value.replace(/[^\w.:/@+ -]/g, '').slice(0, 200) : '';
 
 // Changing the model cancels only the current model HTTP request. The turn's

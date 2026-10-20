@@ -102,7 +102,7 @@ test('Groq input that alone exceeds TPM goes directly to the next model without 
   assert.equal(bodies.length,2);assert.equal(charged,1);assert.equal(bodies[1].model,'other-provider');
   assert.equal(bodies[1].max_tokens,8192);assert.deepEqual(bodies[0].messages,bodies[1].messages);
   assert.equal(bodies[1].messages.at(-1).content,user);assert.deepEqual(bodies[0].tools,bodies[1].tools);
-  assert.equal(failures[0][1],413);assert.deepEqual(failures[0][3],{scope:'model'});
+  assert.equal(failures[0][1],413);assert.deepEqual(failures[0][3],{scope:'request',reason:'request_too_large'});
 });
 
 test('a second Groq size rejection cannot loop and completed tools survive model fallback',async()=>{
@@ -120,17 +120,21 @@ test('a second Groq size rejection cannot loop and completed tools survive model
   assert.equal(bodies[3].messages.at(-1).content,'already-completed');
 });
 
-test('unrelated 413 responses and provider refusals never use the TPM budget retry',async()=>{
-  for(const payload of [
-    {error:{type:'tokens',code:'rate_limit_exceeded',message:'Context length exceeded'}},
-    {error:{type:'content_filter',code:'content_filter',message:'This request is restricted'}},
-  ]) {
-    let fetches=0;
-    await withFetch(async()=>{fetches++;return Response.json(payload,{status:413});},async()=>{
-      await assert.rejects(api().complete(request({attempts:[groqCandidate(),candidate('other-provider')]})),/rejected request \(413\)/);
-    });
-    assert.equal(fetches,1);
-  }
+test('unrelated 413 advances to the next model without a TPM retry; policy refusal stays final',async()=>{
+  const bodies=[],failures=[];
+  await withFetch(async(_url,options)=>{
+    bodies.push(JSON.parse(options.body));
+    return bodies.length===1?Response.json({error:{type:'tokens',code:'rate_limit_exceeded',message:'Context length exceeded'}},{status:413}):answer({content:'done'});
+  },()=>api().complete(request({attempts:[groqCandidate(),candidate('other-provider')],onProviderFailure:(...args)=>failures.push(args)})));
+  assert.deepEqual(bodies.map(body=>body.model),['openai/gpt-oss-120b','other-provider']);
+  assert.deepEqual(failures[0][3],{scope:'request',reason:'request_too_large'});
+  let filteredFetches=0;
+  await withFetch(async()=>{
+    filteredFetches++;return Response.json({error:{type:'content_filter',code:'content_filter',message:'This request is restricted'}},{status:413});
+  },async()=>{
+    assert.match(await api().complete(request({attempts:[groqCandidate(),candidate('other-provider')]})),/제공자 정책/);
+  });
+  assert.equal(filteredFetches,1);
   let fetches=0;
   await withFetch(async()=>{fetches++;return answer({refusal:'This request is restricted.',content:null});},
     ()=>api().complete(request({attempts:[groqCandidate(),candidate('other-provider')]})));
