@@ -2233,7 +2233,7 @@ export async function startCommunity(options = {}) {
         error: e.status
           ? e.message
           : "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
-        ...(e.code === "ROOM_READ_ONLY" || /^MOBILE_[A-Z_]+$/.test(e.code ?? "") ? {code:e.code} : {}),
+        ...(["ROOM_READ_ONLY","device_capacity_busy","device_slots_full","device_sleeping","device_busy","text_unicode_unsupported"].includes(e.code) || /^MOBILE_[A-Z_]+$/.test(e.code ?? "") ? {code:e.code} : {}),
       });
     }
   });

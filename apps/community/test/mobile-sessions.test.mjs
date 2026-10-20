@@ -221,3 +221,10 @@ test("mobile unavailable codes reach the UI without exposing broker credentials"
   const response=await f.call(`/api/rooms/${room}/mobile`,f.owner);
   assert.equal(response.status,503);assert.equal(response.data.code,"MOBILE_NOT_CONFIGURED");
 });
+
+
+test("mobile capacity errors retain their safe UI code", async t => {
+  const f=await fixture(t,{wake:async()=>{throw Object.assign(new Error("Other mobile devices are busy"),{status:409,code:"device_capacity_busy"});}});
+  const room=await f.room(f.owner);const response=await f.call(`/api/rooms/${room}/mobile/wake`,f.owner,{});
+  assert.equal(response.status,409);assert.equal(response.data.code,"device_capacity_busy");
+});

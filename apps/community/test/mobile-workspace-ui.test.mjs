@@ -168,5 +168,5 @@ test('a successful send finishing after the popup closes clears its retained dra
 
 test('unconfigured mobile shows a useful Korean explanation without waking or hiding the room chat',async()=>{
   const {mount}=dom(),requests=[];const view=createMobileWorkspace({mount,roomId:'room-A',api:async path=>{requests.push(path);throw Object.assign(new Error('Mobile devices are not connected'),{code:'MOBILE_NOT_CONFIGURED',status:503});},mobileChat:{load:async()=>({messages:[],readOnly:false}),send:async()=>{}}});
-  await flush();assert.match(find(mount,'mobile-screen-message').textContent,/모바일 서버가 아직 연결되지 않았습니다/);assert.equal(buttonBy(mount,'모바일 깨우기').disabled,true);assert.equal(find(mount,'mobile-chat-input').disabled,false);assert.deepEqual(requests,['/api/rooms/room-A/mobile']);view.destroy();
+  await flush();assert.match(find(mount,'mobile-screen-message').textContent,/이 서버의 Android 실행 환경이 아직 준비되지 않았습니다/);assert.equal(buttonBy(mount,'모바일 깨우기').disabled,true);assert.equal(find(mount,'mobile-chat-input').disabled,false);assert.deepEqual(requests,['/api/rooms/room-A/mobile']);view.destroy();
 });
