@@ -1,10 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import { loginOrigin } from './login-requests.mjs';
 
-const fail = (code = 'LOGIN_TARGET_CHANGED') => Object.assign(new Error(
-  code === 'LOGIN_FORM_UNSUPPORTED' ? '자동 입력할 로그인 화면을 확인할 수 없습니다. 브라우저에서 로그인 화면을 열어주세요.' :
-    '로그인 화면이 바뀌었습니다. 현재 화면에서 다시 로그인 요청을 해주세요.'
-), { status: 409, code });
+const messages = {
+  LOGIN_TARGET_CHANGED:'로그인 화면이 바뀌었습니다. 현재 화면에서 다시 로그인 요청을 해주세요.',
+  LOGIN_FORM_UNSUPPORTED:'자동 입력할 로그인 화면을 확인할 수 없습니다. 브라우저에서 로그인 화면을 열어주세요.',
+  LOGIN_URL_INVALID:'로그인할 사이트의 HTTPS 주소를 확인해주세요.',
+  LOGIN_TARGET_MISMATCH:'요청한 사이트와 현재 브라우저 주소가 다릅니다. 로그인할 사이트를 확인해주세요.',
+  LOGIN_LINK_UNSUPPORTED:'로그인 링크를 하나로 확인하지 못했습니다. 브라우저에서 로그인 화면을 연 뒤 다시 요청해주세요.',
+  LOGIN_NAVIGATION_FAILED:'로그인 화면으로 이동하지 못했습니다. 브라우저에서 사이트를 확인해주세요.',
+};
+const fail = (code = 'LOGIN_TARGET_CHANGED') => Object.assign(new Error(messages[code]), { status:code === 'LOGIN_URL_INVALID' ? 400 : 409, code });
+const hostName = value => new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+const sameSite = (value, rootHost) => {
+  try {
+    const url = new URL(value), host = hostName(value);
+    return url.protocol === 'https:' && !url.username && !url.password && (host === rootHost || host.endsWith('.' + rootHost));
+  } catch { return false; }
+};
+function requestedUrl(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 2048 || /[\s\\\x00-\x1f\x7f]/.test(value.trim())) throw fail('LOGIN_URL_INVALID');
+  try {
+    const url = new URL(value.includes('://') ? value.trim() : 'https://' + value.trim());
+    loginOrigin(url.origin);
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw fail('LOGIN_URL_INVALID');
+    return url.href;
+  } catch { throw fail('LOGIN_URL_INVALID'); }
+}
 async function bounded(operation, signal) {
   let timer, abort;
   try {
@@ -100,6 +121,25 @@ function fillForm(target, { username, password, origin, href, deadline }) {
   return { status: 'filled', nextStep: target.password ? 'submit' : 'continue' };
 }
 
+// Read only actual visible anchors. Never use buttons, form submits, page text
+// instructions, an LLM-generated URL, or a guessed /login route.
+function captureLoginLink(rootHost) {
+  const text = /^(?:[a-z0-9가-힣._-]{1,30}\s*)?(?:로그인|log\s*in|sign\s*in)(?:\s*(?:하기|하세요))?$/i;
+  const candidates = Array.from(document.querySelectorAll('a[href]')).slice(0, 1000).filter(node => {
+    const style = getComputedStyle(node), box = node.getBoundingClientRect();
+    if (!node.isConnected || style.display === 'none' || style.visibility === 'hidden' || box.width <= 0 || box.height <= 0 ||
+        node.hasAttribute('download') || !['', '_self'].includes((node.getAttribute('target') || '').toLowerCase())) return false;
+    if (!text.test((node.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 120))) return false;
+    try {
+      const url = new URL(node.getAttribute('href'), location.href), host = url.hostname.toLowerCase().replace(/^www\./, '');
+      return url.protocol === 'https:' && !url.username && !url.password && url.href !== location.href &&
+        (host === rootHost || host.endsWith('.' + rootHost)) && /(?:login|log[-_]in|signin|sign[-_]in|authenticate|\/auth(?:\/|$))/i.test(url.pathname);
+    } catch { return false; }
+  });
+  if (candidates.length !== 1) throw new Error('No unique same-site login anchor');
+  return candidates[0];
+}
+
 /** Private methods only: these are not part of BROWSER_TOOL_DEFINITIONS. */
 export function createBrowserLogin({ enqueue, pageFor, assertSafeUrl, redact, invalidate, now = Date.now, ttlMs = 600_000 }) {
   const targets = new Map();
@@ -109,33 +149,113 @@ export function createBrowserLogin({ enqueue, pageFor, assertSafeUrl, redact, in
       targets.delete(id); await dispose(target);
     }
   }
+  async function capture(roomId, page, signal) {
+    const href = page.url(), origin = loginOrigin(new URL(href).origin);
+    await assertSafeUrl(href);
+    signal?.throwIfAborted();
+    let handle;
+    try {
+      const pendingHandle = page.evaluateHandle(captureForm);
+      try { handle = await bounded(() => pendingHandle, signal); }
+      catch (error) { void pendingHandle.then(late => late.dispose()).catch(() => {}); throw error; }
+      const checked = await bounded(() => handle.evaluate(target => ({ href: target.href, origin: target.origin })), signal);
+      if (checked.href !== href || checked.origin !== origin || page.url() !== href) throw fail();
+      if (targets.size >= 64) {
+        const [oldId, oldTarget] = targets.entries().next().value;
+        targets.delete(oldId); await dispose(oldTarget);
+      }
+      const tabRef = randomUUID(), expiresAt = now() + ttlMs;
+      targets.set(tabRef, { roomId, page, href, origin, handle, expiresAt });
+      return { origin, tabRef, siteLabel: new URL(origin).hostname, expiresAt };
+    } catch {
+      await handle?.dispose().catch(() => {});
+      signal?.throwIfAborted();
+      throw fail('LOGIN_FORM_UNSUPPORTED');
+    }
+  }
   return {
     captureLoginTarget(roomId, { signal } = {}) {
       return enqueue(roomId, async () => {
         signal?.throwIfAborted();
         await prune();
         const { page } = await pageFor(roomId);
-        const href = page.url(), origin = loginOrigin(new URL(href).origin);
-        await assertSafeUrl(href);
+        return capture(roomId, page, signal);
+      });
+    },
+    prepareLoginTarget(roomId, options = {}) {
+      return enqueue(roomId, async () => {
+        if (!options || typeof options !== 'object' || Object.keys(options).some(key => !['url', 'expectedOrigin', 'signal'].includes(key))) throw fail('LOGIN_URL_INVALID');
+        const { url, expectedOrigin, signal } = options;
+        signal?.throwIfAborted(); await prune();
+        let expected;
+        try { if (expectedOrigin !== undefined) expected = loginOrigin(expectedOrigin); }
+        catch { throw fail('LOGIN_URL_INVALID'); }
+        const destination = url === undefined ? null : requestedUrl(url), rootHost = destination && hostName(destination);
+        if (destination) await assertSafeUrl(destination);
         signal?.throwIfAborted();
-        let handle;
-        try {
-          const pendingHandle = page.evaluateHandle(captureForm);
-          try { handle = await bounded(() => pendingHandle, signal); }
-          catch (error) { void pendingHandle.then(late => late.dispose()).catch(() => {}); throw error; }
-          const checked = await bounded(() => handle.evaluate(target => ({ href: target.href, origin: target.origin })), signal);
-          if (checked.href !== href || checked.origin !== origin || page.url() !== href) throw fail();
-          if (targets.size >= 64) {
-            const [oldId, oldTarget] = targets.entries().next().value;
-            targets.delete(oldId); await dispose(oldTarget);
+        const { page, session } = await pageFor(roomId);
+        const verifySite = () => {
+          signal?.throwIfAborted();
+          if ((expected && new URL(page.url()).origin !== expected) || (destination && !sameSite(page.url(), rootHost))) throw fail('LOGIN_TARGET_MISMATCH');
+        };
+        // A continuation without a new URL is bound to the exact authorized
+        // origin. It never searches the web or silently switches sites.
+        if (!destination) {
+          verifySite();
+          try { return await capture(roomId, page, signal); }
+          catch (error) {
+            signal?.throwIfAborted();
+            if (error.code === 'LOGIN_INPUT_INVALID') throw fail('LOGIN_FORM_UNSUPPORTED');
+            throw error;
           }
-          const tabRef = randomUUID(), expiresAt = now() + ttlMs;
-          targets.set(tabRef, { roomId, page, href, origin, handle, expiresAt });
-          return { origin, tabRef, siteLabel: new URL(origin).hostname, expiresAt };
-        } catch {
-          await handle?.dispose().catch(() => {});
-          throw fail('LOGIN_FORM_UNSUPPORTED');
         }
+        const tryCapture = async () => {
+          try { verifySite(); return await capture(roomId, page, signal); }
+          catch (error) {
+            signal?.throwIfAborted();
+            if (error.code !== 'LOGIN_FORM_UNSUPPORTED') throw error;
+            return null;
+          }
+        };
+        if (sameSite(page.url(), rootHost) && (!expected || new URL(page.url()).origin === expected)) {
+          const current = await tryCapture();
+          if (current) return current;
+        }
+        try {
+          await invalidate(session); signal?.throwIfAborted();
+          await page.goto(destination, {waitUntil:'domcontentloaded', timeout:10000});
+        } catch {
+          signal?.throwIfAborted(); throw fail('LOGIN_NAVIGATION_FAILED');
+        }
+        verifySite();
+        const direct = await tryCapture();
+        if (direct) return direct;
+        const before = page.url();
+        let link;
+        try {
+          const pendingLink = page.evaluateHandle(captureLoginLink, rootHost);
+          try { link = await bounded(() => pendingLink, signal); }
+          catch (error) { void pendingLink.then(late => late.dispose()).catch(() => {}); throw error; }
+          const href = await bounded(() => link.evaluate(node => node.href), signal);
+          if (!sameSite(href, rootHost) || page.url() !== before) throw fail('LOGIN_TARGET_MISMATCH');
+          await assertSafeUrl(href);
+          verifySite();
+          const valid = await bounded(() => link.evaluate((node, expected) => node.isConnected && node.tagName === 'A' && node.href === expected, href), signal);
+          if (!valid || page.url() !== before) throw fail('LOGIN_TARGET_CHANGED');
+          await invalidate(session); signal?.throwIfAborted();
+          // Arm navigation before clicking the anchor. Do not click a submit or
+          // continue button; the separate private fill flow remains user-driven.
+          const navigation = page.waitForURL(url => url.href !== before, {waitUntil:'domcontentloaded', timeout:10000});
+          navigation.catch(() => {});
+          await link.asElement().click({timeout:5000});
+          await navigation;
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (error.code === 'LOGIN_TARGET_MISMATCH') throw error;
+          throw fail('LOGIN_LINK_UNSUPPORTED');
+        } finally { await link?.dispose().catch(() => {}); }
+        verifySite();
+        return capture(roomId, page, signal);
       });
     },
     fillLogin({ roomId, origin, tabRef, username, password, signal, authorize }) {

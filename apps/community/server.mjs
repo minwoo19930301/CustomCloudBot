@@ -21,6 +21,7 @@ import { createRunModelControl } from "./model-control.mjs";
 import { createUsageStore } from "./usage.mjs";
 import { createSetupVault } from "./setup-vault.mjs";
 import { createLoginRequests } from "./login-requests.mjs";
+import { resolveLoginIntent } from "./login-intent.mjs";
 import { serviceIdentity } from "./identity.mjs";
 import { assistantInstructions } from "./assistant-instructions.mjs";
 import { DRAWING_TOOLS, DRAWING_PROMPT, renderDrawing } from "./drawings.mjs";
@@ -229,25 +230,41 @@ export async function startCommunity(options = {}) {
     },
     fill:args=>browserTools.fillLogin({...args,authorize:args.assertAuthorized}),
   });
-  const loginIntent = text => /로그인|\blog[ -]?in\b|\bsign[ -]?in\b/i.test(text || "");
-  // Only a direct "log in here" request may capture the existing page before
-  // model navigation. A named site/URL could refer to a different destination.
-  const currentPageLoginIntent = text => /^(?:(?:여기(?:에|서)?|(?:이|현재)\s*(?:브라우저|화면|페이지|사이트)(?:에|에서)?)\s*)?로그인(?:\s*(?:좀\s*)?(?:해\s*줘|해\s*주세요|하기|하자|부탁해))?[.!?~\s]*$/i.test((text || "").trim()) ||
-    /^(?:please\s+)?(?:log[ -]?in|sign[ -]?in)(?:\s+here)?[.!?\s]*$/i.test((text || "").trim());
   const loginTool = {type:"function",function:{name:"request_browser_login",
     description:"Open a private Vault account chooser for the deployment owner's current login request. Navigate to the intended HTTPS login page first. Takes no credentials or URL. Never ask for passwords in chat; after requesting, wait for the user to fill the form from Vault.",
     parameters:{type:"object",properties:{},additionalProperties:false},
   }};
-  async function requestBrowserLogin(userId,roomId,signal) {
+  async function requestBrowserLogin(userId,roomId,signal,prepare) {
     const actor=db.prepare("SELECT id,role FROM users WHERE id=?").get(userId);
     if(!actor || !hostAdmin.authorized(userId))throw failure(403,"이 계정에는 로그인 Vault 권한이 없습니다.");
     assertRoomWritable(roomFor(roomId,actor),userId);
     if(typeof browserTools.captureLoginTarget!=="function")throw failure(503,"브라우저 로그인 연결을 준비하지 못했습니다.");
+    if(prepare?.url && typeof browserTools.prepareLoginTarget!=="function")
+      throw failure(503,"로그인할 사이트로 이동하는 연결을 준비하지 못했습니다.");
     if(!browserTools.configured(roomId) && provisioner.enabled)await provisioner.ensure(roomId);
-    const target=await browserTools.captureLoginTarget(roomId,{signal});
+    const target=prepare && typeof browserTools.prepareLoginTarget==="function"
+      ? await browserTools.prepareLoginTarget(roomId,{...prepare,signal})
+      : await browserTools.captureLoginTarget(roomId,{signal});
+    if(prepare?.expectedOrigin && target.origin!==prepare.expectedOrigin)
+      throw failure(409,"로그인 화면이 바뀌었습니다. 로그인할 사이트를 다시 알려주세요.");
     signal?.throwIfAborted();
     return loginRequests.request({userId,roomId,...target});
   }
+  function priorLoginMessages(roomId,userId,messageId) {
+    if(!messageId)return [];
+    const anchor=db.prepare("SELECT rowid,created_at FROM messages WHERE id=? AND room_id=? AND author_id=? AND kind='human'").get(messageId,roomId,userId);
+    if(!anchor)return [];
+    const rows=db.prepare("SELECT m.text,m.author_id,m.created_at,o.origin_id FROM messages m LEFT JOIN message_origins o ON o.message_id=m.id WHERE m.room_id=? AND m.rowid<? AND m.kind='human' ORDER BY m.rowid DESC LIMIT 6").all(roomId,anchor.rowid);
+    const previous=[];
+    for(const row of rows) {
+      // A shared-room participant, copied fork, stale request or intervening topic
+      // must not silently authorize a login. The intent parser handles topic breaks.
+      if(row.author_id!==userId || row.origin_id || row.created_at<Math.max(anchor.created_at,Date.now())-10*60_000)break;
+      previous.push(row);
+    }
+    return previous;
+  }
+  const loginNotice=request=>`${new URL(request.origin).hostname}의 Vault 로그인 창을 열었습니다. 계정을 선택하거나 저장하면 로그인 칸에 입력됩니다. 비밀번호는 채팅에 적지 마세요.`;
   let desktopHub,workspaceHub,desktopMediaHub;
   const mobileHub = options.mobileHub ?? createMobileHub({env, assertWritable:(roomId,userId)=>{
     const actor=db.prepare("SELECT id,role FROM users WHERE id=?").get(userId);
@@ -734,13 +751,29 @@ export async function startCommunity(options = {}) {
       controller.signal.throwIfAborted();
       const hasBrowser = browserTools.configured(room.id) || provisioner.enabled;
       const hasMobile = mobileHub.configured();
-      const canLogin = ownerAccess && hasBrowser && loginIntent(channel.requestText ?? channel.mailText);
-      let pendingLogin;
-      if(canLogin && currentPageLoginIntent(channel.requestText ?? channel.mailText)) {
-        // A visible login form can hand off immediately, even if the model does
-        // not call tools. If navigation is needed the same tool remains available.
-        try { pendingLogin=await requestBrowserLogin(userId,room.id,controller.signal); }
-        catch { controller.signal.throwIfAborted(); }
+      const loginIntent = resolveLoginIntent({text:channel.requestText ?? channel.mailText ?? "",
+        previous:priorLoginMessages(room.id,userId,channel.messageId)});
+      const canLogin = ownerAccess && hasBrowser && loginIntent.requested;
+      let pendingLogin, loginPreparation;
+      if(canLogin && !channel.mailText) {
+        const previousPending=(await loginRequests.list(userId)).find(item=>item.roomId===room.id);
+        const prepare=loginIntent.targetUrl ? {url:loginIntent.targetUrl} :
+          loginIntent.currentPage ? {} : loginIntent.continuation && previousPending ? {expectedOrigin:previousPending.origin} : null;
+        loginPreparation=prepare;
+        if(prepare) {
+          reportProgress(room.id,"tool","로그인 화면 확인 중");
+          try { pendingLogin=await requestBrowserLogin(userId,room.id,controller.signal,prepare); }
+          catch { controller.signal.throwIfAborted(); }
+        }
+        if(pendingLogin) {
+          // This is an app capability with a verified result, not a model answer.
+          // No provider may replace a successfully opened private dialog with a
+          // generic refusal or claim that the account has already signed in.
+          const text=loginNotice(pendingLogin);
+          insertMessage(room.id,"bot","Agent Bot",text);
+          runOutcome="complete";
+          return {ok:true,text};
+        }
       }
       jobDir = await mkdtemp(join(dataDir, "job-"));
       controller.signal.throwIfAborted();
@@ -782,7 +815,7 @@ export async function startCommunity(options = {}) {
             const bot = BOTS.find((item) => item.id === agentId);
             const active = choice?.apiKey ? directLlm : llm;
             reportProgress(room.id,"model","답변 요청 중");
-            return active.complete(
+            return Promise.resolve(active.complete(
               {
                 system:
                   // Provider adapters wrap the final text for the runner. Its
@@ -813,7 +846,8 @@ export async function startCommunity(options = {}) {
                   if(name === "request_browser_login") {
                     if(!canLogin || calls!==1)throw failure(403,"현재 사용자의 로그인 요청에서만 Vault를 열 수 있습니다.");
                     if(args && Object.keys(args).length)throw failure(400,"로그인 도구에는 계정이나 사이트 주소를 넣지 마세요.");
-                    pendingLogin ??= await requestBrowserLogin(userId,room.id,controller.signal);
+                    pendingLogin ??= await requestBrowserLogin(userId,room.id,controller.signal,
+                      loginPreparation || (loginIntent.targetUrl ? {url:loginIntent.targetUrl} : undefined));
                     return JSON.stringify({status:"awaiting_private_login",message:"사용자에게 비공개 Vault 계정 선택 창을 열었습니다. 입력을 기다리세요."});
                   }
                   if(name === "create_drawing") {
@@ -891,6 +925,9 @@ export async function startCommunity(options = {}) {
                 signal ?? new AbortController().signal,
                 controller.signal,
               ]),
+            )).then(
+              result=>pendingLogin ? "SendMessage: "+JSON.stringify({type:"text",content:loginNotice(pendingLogin)}) : result,
+              error=>{if(pendingLogin && !controller.signal.aborted)return "SendMessage: "+JSON.stringify({type:"text",content:loginNotice(pendingLogin)});throw error;},
             );
           },
         }),
@@ -1092,12 +1129,13 @@ export async function startCommunity(options = {}) {
     if(signal) routineOwner(user.id,room.id);
     roomFor(room.id,user);
     if(!queuedItem) limit("message:" + user.id, 30);
-    let needsTitle = false;
+    let needsTitle = false, submittedMessageId;
     transaction(() => {
       reserve(user.id, Math.max(1, selected.length));
       const awaitingForkTitle=pendingRoomTitle(room);
       if(queuedItem && messageQueue.get(queuedItem.id)?.state!=="queued") throw failure(409,"대기 메시지가 이미 처리되었거나 취소되었습니다.");
       const messageId=insertMessageWithAttachments(room.id, user.displayName, content, user.id, scopedNonce, [...new Set(attachmentIds)],Boolean(queuedItem));
+      submittedMessageId=messageId;
       conversationActivity.touch(user.id, room.id);
       if(queuedItem) messageQueue.claim(queuedItem.id,messageId);
       const currentName=db.prepare("SELECT name FROM rooms WHERE id=?").get(room.id)?.name;
@@ -1113,7 +1151,7 @@ export async function startCommunity(options = {}) {
       roomProgress.set(room.id,[]);
       roomJobs.add(room.id);
       reportProgress(room.id,"accepted","요청 접수됨");
-      const job = botRun(room, selected, user.id, choice, {signal,requestText:content,modelChoice,effortChoice,queueId:queuedItem?.id,continuation:queuedItem?.payload.continuation});
+      const job = botRun(room, selected, user.id, choice, {signal,requestText:content,messageId:submittedMessageId,modelChoice,effortChoice,queueId:queuedItem?.id,continuation:queuedItem?.payload.continuation});
       jobs.add(job);
       void job.then(result=>{if(queuedItem)messageQueue.finish(queuedItem.id,result.interrupted?"interrupted":result.ok?"completed":"failed");}).finally(() => {jobs.delete(job);scheduleQueueDrain();}).catch(() => {});
     } else if(queuedItem) {
