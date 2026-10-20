@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -197,14 +198,25 @@ class RealPulseBridgeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await ws.receive_json())["type"], "ready")
                     with tempfile.TemporaryFile() as capture:
                         recorder = subprocess.Popen(["parec", "--raw", "--format=s16le", "--rate=48000", "--channels=1",
+                                                     "--latency-msec=20", "--process-time-msec=5",
                                                      "--device=" + bridge.runtime.MICROPHONE], env=environment,
                                                     stdout=capture, stderr=subprocess.DEVNULL)
-                        await asyncio.sleep(0.1)
+                        async def wait_for_capture(minimum):
+                            deadline = time.monotonic() + 5
+                            while time.monotonic() < deadline:
+                                size = os.fstat(capture.fileno()).st_size
+                                if size >= minimum:
+                                    return size
+                                if recorder.poll() is not None:
+                                    self.fail("PulseAudio recorder exited before delivering samples")
+                                await asyncio.sleep(0.01)
+                            self.fail(f"PulseAudio capture stalled at {os.fstat(capture.fileno()).st_size} bytes; expected {minimum}")
+                        initial_bytes = await wait_for_capture(4096)
                         tone = array.array("h", (int(10000 * math.sin(2 * math.pi * 440 * i / 48000)) for i in range(1920))).tobytes()
                         for _ in range(20):
                             await ws.send_bytes(tone)
                             await asyncio.sleep(0.04)
-                        await asyncio.sleep(0.15)
+                        await wait_for_capture(initial_bytes + len(tone) * 20)
                         await ws.close()
                         for _ in range(100):
                             if players[0].returncode is not None:

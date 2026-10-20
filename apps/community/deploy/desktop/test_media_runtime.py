@@ -70,12 +70,27 @@ class PulseIntegrationTests(unittest.TestCase):
         samples = array.array("h", (int(10000 * math.sin(2 * math.pi * 440 * i / 48000)) for i in range(24000)))
         with tempfile.TemporaryFile() as capture:
             recorder = subprocess.Popen(["parec", "--raw", "--format=s16le", "--rate=48000", "--channels=1",
+                                         "--latency-msec=20", "--process-time-msec=5",
                                          "--device=" + runtime.MICROPHONE], env=self.environment, stdout=capture, stderr=subprocess.DEVNULL)
+            def wait_for_capture(minimum):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    size = os.fstat(capture.fileno()).st_size
+                    if size >= minimum:
+                        return size
+                    if recorder.poll() is not None:
+                        self.fail("PulseAudio recorder exited before delivering samples")
+                    time.sleep(0.01)
+                self.fail(f"PulseAudio capture stalled at {os.fstat(capture.fileno()).st_size} bytes; expected {minimum}")
             try:
-                time.sleep(0.15)
+                # A running process is not proof that its capture stream is ready.
+                # Wait for delivered silence, then keep the recorder alive until
+                # at least the entire tone duration has arrived at stdout.
+                initial_bytes = wait_for_capture(4096)
                 subprocess.run(["pacat", "--playback", "--raw", "--format=s16le", "--rate=48000", "--channels=1",
+                                "--latency-msec=30", "--process-time-msec=10",
                                 "--device=" + sink], input=samples.tobytes(), env=self.environment, check=True, timeout=5)
-                time.sleep(0.15)
+                wait_for_capture(initial_bytes + len(samples) * samples.itemsize)
             finally:
                 recorder.terminate()
                 recorder.wait(timeout=5)
