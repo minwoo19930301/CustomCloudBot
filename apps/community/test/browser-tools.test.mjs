@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
+import { runInNewContext } from "node:vm";
 import { createBrowserTools, assertSafeUrl, isPrivateAddress, BROWSER_TOOL_DEFINITIONS } from "../browser-tools.mjs";
 
 test("browser URL validation blocks credentials, private DNS, and metadata ranges", async () => {
@@ -81,7 +82,7 @@ test("private Vault capture shares the desktop queue and later model snapshots r
       return {href:f.page.url(),origin:"https://example.com"};
     },dispose:async()=>{}};
   };
-  f.page.locator=()=>({elementHandles:async()=>[],evaluate:async()=>`Page echoed ${username} and ${password}`});
+  f.page.locator=()=>({elementHandles:async()=>[],evaluate:async fn=>fn({innerText:`Page echoed ${username} and ${password}`})});
   const frame=f.tools.frame("room-A");
   await new Promise(resolve=>setImmediate(resolve));
   const capturing=f.tools.captureLoginTarget("room-B");
@@ -96,6 +97,69 @@ test("private Vault capture shares the desktop queue and later model snapshots r
   assert.ok(!snapshot.includes(username));assert.ok(!snapshot.includes(password));
   assert.match(snapshot,/비공개 로그인 정보/);
   assert.ok(BROWSER_TOOL_DEFINITIONS.every(tool=>!["captureLoginTarget","fillLogin"].includes(tool.function.name)));
+});
+
+test("private snapshot redacts credentials cut at body, label and attribute boundaries without sending secrets into page readers", async t => {
+  t.mock.method(dns, "lookup", async () => [{address:"93.184.216.34"}]);
+  const f=workspaceBrowserFixture(t,{shared:true}),username="vault-owner@example.com",password="credential-only-$BOUNDARY-UNIQUE-Z9!";
+  f.page.evaluateHandle=async()=>({
+    evaluate:async(_callback,args)=>args?{status:"filled",nextStep:"submit"}:{href:f.page.url(),origin:"https://example.com"},
+    dispose:async()=>{},
+  });
+  const target=await f.tools.captureLoginTarget("room");
+  await f.tools.fillLogin({roomId:"room",...target,username,password,authorize:async()=>{}});
+  let body="",nodes=[];
+  const reads=[];
+  const evaluate=(fn,node,arg)=>{
+    reads.push(arg);
+    return runInNewContext(`(${fn.toString()})(node, argument)`,{
+      node,argument:arg,getComputedStyle:()=>({display:"block",visibility:"visible"}),
+    });
+  };
+  f.page.locator=selector=>({
+    evaluate:async(fn,arg)=>evaluate(fn,{innerText:body},arg),
+    elementHandles:async()=>selector==="body"?[]:nodes.map(node=>({
+      evaluate:async(fn,arg)=>evaluate(fn,node,arg),dispose:async()=>{},
+    })),
+  });
+  const prefix=password.slice(0,10),safeText=`A normal ${prefix} word stays visible.`;
+  const cutValue=max=>"X".repeat(max-prefix.length)+password+" after the boundary";
+  for(const [field,max] of [["body",5000],["text",180],["href",2048],["type",40]]){
+    body=field==="body"?safeText+"X".repeat(5000-safeText.length-prefix.length)+password+" after":safeText;
+    const attrs={href:field==="href"?cutValue(max):"",type:field==="type"?cutValue(max):"button"};
+    nodes=field==="body"?[]:[{
+      tagName:"BUTTON",innerText:field==="text"?cutValue(max):"Continue",
+      getAttribute:key=>attrs[key]||null,getBoundingClientRect:()=>({width:10,height:10}),
+    }];
+    const snapshot=await f.tools.execute("room","browser_snapshot");
+    assert.ok(snapshot.includes(safeText),`${field}: a secret prefix inside ordinary text must stay intact`);
+    assert.equal(snapshot.split(prefix).length-1,1,`${field}: only the uncut ordinary occurrence may remain`);
+    assert.ok(!snapshot.includes(password),field);
+    assert.match(snapshot,/비공개 로그인/,field);
+    assert.ok(snapshot.length<=8000,field);
+  }
+  for(const length of [1,password.length-1]){
+    body="X".repeat(5000-length)+password+" after";nodes=[];
+    const snapshot=await f.tools.execute("room","browser_snapshot");
+    assert.ok(!snapshot.includes("XXXXX"+password.slice(0,length)),
+      `a ${length}-character secret fragment at the cut boundary must be removed`);
+  }
+  const overlappingUsername="overlap-token-A",overlappingPassword="lap-token-AB";
+  const nextTarget=await f.tools.captureLoginTarget("room");
+  await f.tools.fillLogin({roomId:"room",...nextTarget,username:overlappingUsername,password:overlappingPassword,authorize:async()=>{}});
+  body="Before overlap-token-AB after.";nodes=[];
+  assert.match(await f.tools.execute("room","browser_snapshot"),/Before \[비공개 로그인 정보\] after\./,
+    "overlapping complete credentials must be redacted as one range without leftover fragments");
+  body="X".repeat(4999)+password+" after";
+  nodes=Array.from({length:30},()=>({
+    tagName:"BUTTON",innerText:"X".repeat(170)+password+" after",
+    getAttribute:()=>null,getBoundingClientRect:()=>({width:10,height:10}),
+  }));
+  const capped=await f.tools.execute("room","browser_snapshot");
+  assert.equal(capped.length,8000);
+  assert.ok(!capped.includes("XXXXX"+prefix),"final output clipping must happen after each component is redacted");
+  assert.ok(reads.every(arg=>!JSON.stringify(arg)?.includes(password)&&!JSON.stringify(arg)?.includes(username)),
+    "snapshot DOM evaluation must never receive saved credentials from any site");
 });
 
 test("workspace navigation rejects private and non-web targets before operating the page",async t=>{

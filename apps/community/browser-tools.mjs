@@ -52,11 +52,47 @@ export async function assertSafeUrl(value, lookup = dns.lookup) {
 }
 
 const clipped = (value, max = MAX_TEXT) => String(value || "").slice(0, max);
-const privateSnapshot = (session, value) => {
-  let result = value;
-  for (const secret of [...(session.loginSecrets || [])].sort((a, b) => b.length - a.length))
-    result = result.replaceAll(secret, "[비공개 로그인 정보]");
-  return result;
+const snapshotRedactor = session => {
+  const patterns = [...(session.loginSecrets || [])].map(secret => {
+    const prefixes = new Uint16Array(secret.length);
+    for (let i = 1, matched = 0; i < secret.length; i++) {
+      while (matched && secret[i] !== secret[matched]) matched = prefixes[matched - 1];
+      if (secret[i] === secret[matched]) matched++;
+      prefixes[i] = matched;
+    }
+    return { secret, prefixes };
+  });
+  return (value, max, truncated = false) => {
+    const raw = String(value || ""), text = raw.slice(0, max);
+    if (!patterns.length) return text;
+    const ranges = new Int32Array(text.length + 1);
+    const mark = (start, end) => { ranges[start]++; ranges[end]--; };
+    for (const { secret, prefixes } of patterns) {
+      // Merge overlapping matches before replacement; one secret must not expose
+      // a fragment of another. Both processing and transferred DOM text are bounded.
+      for (let at = text.indexOf(secret); at !== -1; at = text.indexOf(secret, at + 1))
+        mark(at, at + secret.length);
+      if (truncated || raw.length > max) {
+        let matched = 0;
+        for (let i = Math.max(0, text.length - secret.length + 1); i < text.length; i++) {
+          while (matched && text[i] !== secret[matched]) matched = prefixes[matched - 1];
+          if (text[i] === secret[matched]) matched++;
+        }
+        // Only the cut boundary can match an incomplete secret. Ordinary prefixes
+        // elsewhere in the page are not filtered, and secrets never enter the DOM.
+        if (matched) mark(text.length - matched, text.length);
+      }
+    }
+    const parts = [];
+    let coverage = 0, start = 0, hidden = false;
+    for (let i = 0; i <= text.length; i++) {
+      coverage += ranges[i];
+      if (!hidden && coverage) { parts.push(text.slice(start, i), "[비공개 로그인 정보]"); hidden = true; }
+      else if (hidden && !coverage) { start = i; hidden = false; }
+    }
+    parts.push(text.slice(start));
+    return parts.join("").slice(0, max);
+  };
 };
 function browserEndpoint(endpoint) {
   const base = typeof endpoint === "string" ? endpoint : endpoint?.cdpUrl;
@@ -141,21 +177,34 @@ export function createBrowserTools({ desktops, playwright, fetchImpl } = {}) {
   };
   const snapshot = async (roomId) => {
     const { session, page } = await pageFor(roomId);
+    const redact = snapshotRedactor(session);
     const id = `s${++sequence}`;
     const loc = page.locator("a,button,input,textarea,select,[role=button]");
     const allHandles = loc.elementHandles ? await loc.elementHandles() : [];
     const handles = allHandles.slice(0, 100);
     await Promise.all(allHandles.slice(100).map((handle) => handle.dispose?.().catch?.(() => {})));
-    const elements = await Promise.all(handles.map((handle, i) => handle.evaluate((node, index) => { const s = getComputedStyle(node); const r = node.getBoundingClientRect(); return { i: index, tag: node.tagName.toLowerCase(), role: node.getAttribute("role") || "", text: (node.innerText || node.getAttribute("aria-label") || node.getAttribute("placeholder") || "").slice(0, 180), href: node.getAttribute("href") || "", type: node.getAttribute("type") || "", visible: s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0 }; }, i).catch(() => null))).then((items) => items.filter((e) => e?.visible));
+    const elements = await Promise.all(handles.map((handle, i) => handle.evaluate((node, index) => {
+      const s = getComputedStyle(node), r = node.getBoundingClientRect();
+      const values = { tag: node.tagName.toLowerCase(), text: node.innerText || node.getAttribute("aria-label") || node.getAttribute("placeholder") || "", href: node.getAttribute("href") || "", type: node.getAttribute("type") || "" };
+      const limits = { tag: 40, text: 180, href: 2048, type: 40 }, truncated = {};
+      for (const key of Object.keys(values)) {
+        truncated[key] = values[key].length > limits[key];
+        values[key] = values[key].slice(0, limits[key]);
+      }
+      return { i: index, ...values, truncated, visible: s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0 };
+    }, i).catch(() => null))).then((items) => items.filter((e) => e?.visible));
     const refs = new Map(elements.map((e, visibleIndex) => [`${id}-${visibleIndex}`, { ...e, handle: handles[e.i], pageUrl: page.url?.() || "" }]));
     await Promise.all([...session.refs.values()].map((item) => item.handle?.dispose?.().catch?.(() => {})));
     const kept = new Set([...refs.values()].map(item => item.handle));
     await Promise.all(handles.filter(handle => !kept.has(handle)).map(handle => handle.dispose?.().catch?.(() => {})));
     session.refs = refs;
     session.generation++;
-    const body = clipped(await page.locator("body").evaluate(node => node.innerText.slice(0,5000)).catch(() => ""), 5000);
-    const lines = [...refs.values()].map((e, i) => `[${id}-${i}] ${e.tag}${e.type ? ` type=${e.type}` : ""}${e.href ? ` href=${e.href}` : ""} ${e.text}`);
-    return clipped(privateSnapshot(session, `[UNTRUSTED BROWSER SNAPSHOT]\n${body}\nInteractive elements:\n${lines.join("\n")}`));
+    const body = await page.locator("body").evaluate(node => {
+      const text = node.innerText || "";
+      return { text: text.slice(0, 5000), truncated: text.length > 5000 };
+    }).catch(() => ({ text: "", truncated: false }));
+    const lines = [...refs.values()].map((e, i) => `[${id}-${i}] ${redact(e.tag, 40, e.truncated?.tag)}${e.type ? ` type=${redact(e.type, 40, e.truncated?.type)}` : ""}${e.href ? ` href=${redact(e.href, 2048, e.truncated?.href)}` : ""} ${redact(e.text, 180, e.truncated?.text)}`);
+    return clipped(`[UNTRUSTED BROWSER SNAPSHOT]\n${redact(body.text, 5000, body.truncated)}\nInteractive elements:\n${lines.join("\n")}`);
   };
   const run = async (roomId, name, args = {}, { signal } = {}) => {
     if (signal?.aborted) throw fail(499, "Browser action cancelled");

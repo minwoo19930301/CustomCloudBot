@@ -15,7 +15,7 @@ function deferred() {
   return {promise, resolve};
 }
 
-async function fixture(t, {beforeFill, afterFill, complete, nextStep = 'submit'} = {}) {
+async function fixture(t, {beforeFill, afterFill, complete, execute, nextStep = 'submit'} = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'browser-login-api-'));
   const captures = [], fills = [], modelCalls = [], runtime = {target:{...target}};
   let app;
@@ -25,6 +25,11 @@ async function fixture(t, {beforeFill, afterFill, complete, nextStep = 'submit'}
       signal?.throwIfAborted();
       captures.push(roomId);
       return {...runtime.target};
+    },
+    execute:async (roomId, name, args, {signal} = {}) => {
+      signal?.throwIfAborted();
+      if (!execute) throw new Error('Unexpected browser operation in login fixture');
+      return execute(roomId, name, args);
     },
     fillLogin:async args => {
       try {
@@ -218,6 +223,47 @@ test('an explicit login chat request offers Vault even when the model never invo
   assert.equal(f.modelCalls.length, 1);
   assert.ok(f.modelCalls[0].toolDefinitions.some(tool => tool.function.name === 'request_browser_login'));
   assert.match(f.modelCalls[0].system, /로그인 완료라고 주장하지 말고/);
+});
+
+test('a login request naming another site opens Vault only after model navigation to that site', async t => {
+  const observations = [], navigations = [], toolResults = [];
+  let f;
+  f = await fixture(t, {
+    execute:async (roomId, name, args) => {
+      assert.equal(roomId, f.roomId);
+      assert.equal(name, 'browser_navigate');
+      assert.equal(args.url, 'https://github.com/login');
+      navigations.push(args.url);
+      f.runtime.target = {origin:'https://github.com', tabRef:'github-login-fixture-tab', siteLabel:'GitHub'};
+      return JSON.stringify({url:args.url, title:'Sign in to GitHub'});
+    },
+    complete:async request => {
+      observations.push({
+        captures:f.captures.length,
+        pending:(await f.call('/api/browser-logins', {auth:f.owner})).data.requests.length,
+        advertised:request.toolDefinitions.some(tool => tool.function.name === 'request_browser_login'),
+        alreadyRequested:/현재 로그인 페이지에 대한 Vault 선택 창을 이미 요청했습니다/.test(request.system),
+        origin:f.runtime.target.origin,
+      });
+      await request.browser('browser_navigate', {url:'https://github.com/login'});
+      toolResults.push(JSON.parse(await request.browser('request_browser_login', {})));
+      return answer('GitHub 로그인 페이지의 Vault 계정 선택을 기다립니다.');
+    },
+  });
+  assert.equal((await f.call(`/api/rooms/${f.roomId}/messages`, {auth:f.owner, body:{
+    text:'https://github.com/login 에 로그인하려고 하니까 해당 사이트로 이동하고 Vault 창을 열어 줘',
+    botIds:['bot-analyst'], clientNonce:randomUUID(),
+  }})).status, 202);
+  await f.finish(f.roomId);
+  assert.deepEqual(observations, [{captures:0, pending:0, advertised:true, alreadyRequested:false, origin:target.origin}]);
+  assert.deepEqual(navigations, ['https://github.com/login']);
+  assert.deepEqual(f.captures, [f.roomId]);
+  assert.equal(toolResults[0].status, 'awaiting_private_login');
+  const listed = (await f.call('/api/browser-logins', {auth:f.owner})).data.requests;
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].origin, 'https://github.com');
+  assert.equal(listed[0].siteLabel, 'GitHub');
+  assert.equal(f.fills.length, 0);
 });
 
 test('a model cannot initiate private login when the current user did not request login', async t => {

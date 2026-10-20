@@ -230,6 +230,10 @@ export async function startCommunity(options = {}) {
     fill:args=>browserTools.fillLogin({...args,authorize:args.assertAuthorized}),
   });
   const loginIntent = text => /로그인|\blog[ -]?in\b|\bsign[ -]?in\b/i.test(text || "");
+  // Only a direct "log in here" request may capture the existing page before
+  // model navigation. A named site/URL could refer to a different destination.
+  const currentPageLoginIntent = text => /^(?:(?:여기(?:에|서)?|(?:이|현재)\s*(?:브라우저|화면|페이지|사이트)(?:에|에서)?)\s*)?로그인(?:\s*(?:좀\s*)?(?:해\s*줘|해\s*주세요|하기|하자|부탁해))?[.!?~\s]*$/i.test((text || "").trim()) ||
+    /^(?:please\s+)?(?:log[ -]?in|sign[ -]?in)(?:\s+here)?[.!?\s]*$/i.test((text || "").trim());
   const loginTool = {type:"function",function:{name:"request_browser_login",
     description:"Open a private Vault account chooser for the deployment owner's current login request. Navigate to the intended HTTPS login page first. Takes no credentials or URL. Never ask for passwords in chat; after requesting, wait for the user to fill the form from Vault.",
     parameters:{type:"object",properties:{},additionalProperties:false},
@@ -732,7 +736,7 @@ export async function startCommunity(options = {}) {
       const hasMobile = mobileHub.configured();
       const canLogin = ownerAccess && hasBrowser && loginIntent(channel.requestText ?? channel.mailText);
       let pendingLogin;
-      if(canLogin) {
+      if(canLogin && currentPageLoginIntent(channel.requestText ?? channel.mailText)) {
         // A visible login form can hand off immediately, even if the model does
         // not call tools. If navigation is needed the same tool remains available.
         try { pendingLogin=await requestBrowserLogin(userId,room.id,controller.signal); }
