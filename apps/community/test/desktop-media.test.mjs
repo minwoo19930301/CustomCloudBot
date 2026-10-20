@@ -182,7 +182,7 @@ test('upstream must announce readiness and unavailable startup is bounded', asyn
   f.state.ready = false;
   const start = performance.now();
   assert.equal(await f.rejected(ticket.websocketPath), 500);
-  assert.ok(performance.now() - start < 3000);
+  assert.ok(performance.now() - start < 4000);
   assert.equal(await f.rejected(ticket.websocketPath), 403);
 });
 

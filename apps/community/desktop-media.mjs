@@ -119,7 +119,7 @@ export function createDesktopMediaHub({server, desktops, userFor, roomFor, origi
     target.protocol = 'ws:';
     target.searchParams.set('session', hash(user.id + '\0' + roomId));
     // No browser cookies, Origin, credentials, or user-selected destinations cross this hop.
-    const upstream = new WebSocket(target, {perMessageDeflate:false, maxPayload:4096, handshakeTimeout:2000});
+    const upstream = new WebSocket(target, {perMessageDeflate:false, maxPayload:4096, handshakeTimeout:3000});
     const entry = {base:base.href, client:null, upstream, stop:null};
     connections.add(entry);
     let stopped = false, ready = false, monitor, timeout;
@@ -151,7 +151,8 @@ export function createDesktopMediaHub({server, desktops, userFor, roomFor, origi
       } catch { if (entry.client) stop(); else deny(403); return false; }
     };
     socket.once('close', () => stop());
-    timeout = setTimeout(() => deny(500), 2000); timeout.unref();
+    // Allow the bounded Pulse status, player registration and unmute steps.
+    timeout = setTimeout(() => deny(500), 3000); timeout.unref();
     upstream.on('unexpected-response', (_req, response) => { response.resume(); deny(response.statusCode === 409 ? 409 : 500); });
     upstream.on('error', () => deny(500));
     upstream.on('close', () => { if (entry.client) stop(1011, 'Microphone unavailable'); else deny(500); });

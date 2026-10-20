@@ -116,3 +116,23 @@ Tests use a fake Docker/ADB runtime and temporary private metadata directories;
 they never start or modify real Android containers. Verify actual host boot,
 screenshots, isolation, Unicode input, touch/scroll, sleep/wake persistence and
 resource use separately before enabling the integration for users.
+
+## Camera and microphone input
+
+The current broker does **not** forward a user's physical camera or microphone
+into Android. A camera or recorder APK cannot supply the missing Android hardware
+provider. The desktop's virtual microphone is separate and is never assigned to
+mobile rooms.
+
+Before enabling mobile media, verify the selected Android image's camera provider
+and microphone input HAL, then implement an authenticated room-specific media
+ingress. The upstream Redroid Android 12 image does not ship a camera provider in
+its device manifest. `scrcpy --video-source=camera` and `--audio-source=mic`
+capture Android devices; they do not inject the viewer's camera or microphone.
+Do not advertise those flags as local-device passthrough. KVM-based alternatives
+also require an actual available `/dev/kvm`; they are not a drop-in replacement
+on a host without nested virtualization.
+
+References: [Redroid device manifest](https://github.com/remote-android/device_redroid/blob/redroid-12.0.0/manifest.xml),
+[Redroid WebRTC plans](https://github.com/remote-android/redroid-doc#webrtc-streaming),
+[AOSP external camera providers](https://source.android.com/docs/core/camera/external-usb-cameras).
