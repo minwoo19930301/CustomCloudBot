@@ -46,9 +46,11 @@ jobs:
       - name: Test browser-only window layout
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y xvfb openbox x11-utils
+          sudo apt-get install --no-install-recommends -y xvfb openbox x11-utils pulseaudio pulseaudio-utils ffmpeg
           sh -n apps/community/deploy/desktop/entrypoint.sh
           python3 -m unittest discover -s apps/community/deploy/desktop -p 'test_browser_display.py' -v
+          python3 -m unittest discover -s apps/community/deploy/desktop -p 'test_media_runtime.py' -v
+          "$RUNNER_TEMP/workspace-tests/bin/python" -m unittest discover -s apps/community/deploy/desktop -p 'test_media_bridge.py' -v
 
   deploy:
     needs: verify

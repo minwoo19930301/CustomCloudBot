@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Open a camera device connected to this virtual computer
+Exec=guvcview
+Icon=camera-web
+Terminal=false

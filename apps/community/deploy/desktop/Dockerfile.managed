@@ -2,10 +2,13 @@
 FROM community-desktop:local
 USER root
 RUN apt-get update && apt-get install --no-install-recommends -y pcmanfm python3-aiohttp python3-pyatspi at-spi2-core dbus \
+    pulseaudio pulseaudio-utils libasound2-plugins alsa-utils ffmpeg v4l-utils pavucontrol guvcview \
     && rm -rf /var/lib/apt/lists/*
 COPY browser-openbox.xml /etc/openclawbot/browser-openbox.xml
-COPY terminal.desktop chrome.desktop files.desktop /usr/local/share/applications/
+COPY terminal.desktop chrome.desktop files.desktop camera.desktop sound.desktop /usr/local/share/applications/
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/desktop-entrypoint
 COPY --chmod=0755 workspace-bridge.py /usr/local/bin/workspace-bridge
+COPY --chmod=0755 media-runtime.py /usr/local/bin/desktop-media
+COPY --chmod=0755 media-bridge.py /usr/local/bin/desktop-media-bridge
 USER desktop
-EXPOSE 6083
+EXPOSE 6083 6084

@@ -358,6 +358,7 @@ class Terminal:
             "HOME": str(home), "USER": "desktop", "LOGNAME": "desktop", "SHELL": "/bin/bash",
             "PATH": "/usr/local/bin:/usr/bin:/bin", "TERM": "xterm-256color", "LANG": "C.UTF-8",
             "DISPLAY": ":99", "HISTFILE": "/dev/null", "PS1": "\\u@oci:\\w\\$ ",
+            "PULSE_SERVER": "unix:/run/desktop/pulse/native", "PULSE_RUNTIME_PATH": "/run/desktop/pulse",
         }
         pid, fd = pty.fork()
         if pid == 0:

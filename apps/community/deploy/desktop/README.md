@@ -87,3 +87,58 @@ python -m unittest discover -s apps/community/deploy/desktop -p 'test_workspace_
 ```
 
 References: [aiohttp server/WebSocket API](https://docs.aiohttp.org/en/stable/web_reference.html), [Python PTY API](https://docs.python.org/3/library/pty.html), [Python directory-FD file operations](https://docs.python.org/3/library/os.html#os.open).
+
+## Camera and microphone inside the virtual computer
+
+The image includes PulseAudio, ALSA clients, FFmpeg, V4L2 tools, the `guvcview`
+camera application and `pavucontrol` sound settings. Application launchers are
+installed in `/usr/local/share/applications`. Installing a camera application
+does not create a camera device: no host `/dev/video*` or `/dev/snd` device is
+mapped by default, and no hardware capture starts with the container.
+
+`desktop-media run` starts a non-root PulseAudio daemon before Chrome. It has
+only a local Unix socket inside the private `0700` `/run/desktop/pulse` directory.
+It creates `cloudbot_output` (virtual speakers), `cloudbot_mic_input` (microphone
+ingress sink), and `cloudbot_microphone` (the ingress sink's remapped source).
+The microphone starts muted. PC speaker output is deliberately separate from
+microphone input, preventing an automatic feedback loop. No physical sound card,
+host kernel module, TCP listener, or privileged container is needed for these
+audio devices. `desktop-media status` reports the actual audio devices, mute and
+input state, and any accessible camera device nodes.
+
+`desktop-media-bridge` accepts microphone PCM on private port **6084**, which is
+never published on the host. Like the native workspace bridge, it accepts only
+loopback or the application socket peer `172.30.50.2`, rejects `Origin` headers,
+and relies on the application gateway for user/room authorization. `GET /status`
+(also `/health`) reports microphone support/readiness and active transport state.
+It explicitly reports camera passthrough and remote speaker playback unsupported.
+
+`WS /microphone?session=<64 lowercase hex characters>` reserves the single
+shared-PC microphone. A second connection receives HTTP 409, including another
+connection from the same session. After starting the audio player and unmuting
+the virtual microphone, the bridge sends
+`{"type":"ready","format":"s16le","sampleRate":48000,"channels":1}`. Only
+then may the browser send raw mono 48 kHz signed 16-bit little-endian PCM, at most
+8 KiB per frame. Invalid frames, excess rate, backpressure or eight seconds with
+no input disconnect the transport. Closing the transport mutes the microphone,
+kills the player and discards its pending audio. Audio is not saved to disk.
+The API accepts no device, path or shell command from clients.
+
+The website must request the user's real microphone only after an explicit
+connect action, and stop every local capture track on disconnect. A connected
+PC microphone does not supply media to Android devices: each mobile runtime
+requires its own supported ingress implementation. An OS-visible virtual camera
+for arbitrary PC applications additionally needs a host V4L2 device (commonly
+`v4l2loopback`) and an authenticated frame transport; neither is enabled by this
+audio setup. Do not use Chrome fake-device flags to represent this as a real
+camera connection.
+
+Run `test_media_runtime.py` and `test_media_bridge.py` with Python/aiohttp and
+PulseAudio client binaries installed. The runtime integration test injects a
+generated tone, verifies microphone capture, and checks that PC speaker output
+does not leak into the microphone. The bridge integration test sends generated
+PCM over WebSocket and verifies capture plus mute/player cleanup after closing.
+These tests use synthetic audio, never a real microphone.
+
+References: [PulseAudio modules](https://www.freedesktop.org/wiki/Software/PulseAudio/Documentation/User/Modules/),
+[v4l2loopback prerequisites](https://github.com/v4l2loopback/v4l2loopback#dependencies).

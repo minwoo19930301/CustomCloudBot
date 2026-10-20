@@ -175,6 +175,15 @@ def verify(release, config, desktop=True):
         """.replace('DESKTOP_SERVICE', config['desktop_service'])
         run('docker','exec',config['compose_project']+'-app-1','node','--input-type=module','-e',script)
         run('docker','exec',config['compose_project']+'-'+config['desktop_service']+'-1','google-chrome','--version')
+        # Read-only device check: never capture the operator's mic or inject a
+        # test tone into live apps. Signal routing is verified in isolated CI.
+        media = """
+        const response=await fetch('http://DESKTOP_SERVICE:6084/status',{signal:AbortSignal.timeout(5000)});
+        const state=await response.json();
+        if(!response.ok||!state.ok||state.microphone?.available!==true)throw Error('Virtual microphone unavailable');
+        console.log('Desktop microphone runtime ready; camera transport:',state.camera?.supported===true?'ready':'unavailable');
+        """.replace('DESKTOP_SERVICE', config['desktop_service'])
+        run('docker','exec',config['compose_project']+'-app-1','node','--input-type=module','-e',media)
 
 def deploy(sha):
     sha = validate_sha(sha)

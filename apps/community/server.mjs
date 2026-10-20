@@ -30,6 +30,7 @@ import { createSidebarStore } from "./sidebar.mjs";
 import { createConversationActivity } from "./conversation-activity.mjs";
 import { loadOperatorContext } from "./operator-context.mjs";
 import { createWorkspaceHub, workspacePath } from "./workspace.mjs";
+import { createDesktopMediaHub } from "./desktop-media.mjs";
 import { EFFORTS, createProviderPool, formatModelList, publicModels } from "./providers.mjs";
 import { createOpenClawFromEnv } from "./lib/backend/openclaw-http.mjs";
 import { parseDesktops, createDesktopHub } from "./desktop.mjs";
@@ -215,7 +216,7 @@ export async function startCommunity(options = {}) {
     hasMembership:(userId,roomId)=>Boolean(db.prepare("SELECT 1 FROM room_members WHERE user_id=? AND room_id=?").get(userId,roomId)),
     ...(options.hostAdminRequest ? {requestImpl:options.hostAdminRequest} : {}),
   });
-  let desktopHub,workspaceHub;
+  let desktopHub,workspaceHub,desktopMediaHub;
   const mobileHub = options.mobileHub ?? createMobileHub({env, assertWritable:(roomId,userId)=>{
     const actor=db.prepare("SELECT id,role FROM users WHERE id=?").get(userId);
     if(!actor)throw failure(403,"이 계정으로 모바일을 조작할 수 없습니다.");
@@ -1211,6 +1212,9 @@ export async function startCommunity(options = {}) {
           "/desktop-screen.js": ["desktop-screen.js", "text/javascript"],
           "/remote-keyboard.js": ["remote-keyboard.js", "text/javascript"],
           "/desktop.js": ["desktop.js", "text/javascript"],
+          "/desktop-media.js": ["desktop-media.js", "text/javascript"],
+          "/desktop-microphone-pcm.mjs": ["desktop-microphone-pcm.mjs", "text/javascript"],
+          "/desktop-microphone-worklet.js": ["desktop-microphone-worklet.js", "text/javascript"],
           "/desktop.css": ["desktop.css", "text/css"],
           "/workspace-terminal.js": ["workspace-terminal.js", "text/javascript"],
           "/vendor/xterm.js": ["vendor/xterm.js", "text/javascript"],
@@ -1555,6 +1559,19 @@ export async function startCommunity(options = {}) {
           else result=await mobileHub.launch(room.id,body.package,opts);
         }else throw failure(405,"허용되지 않은 요청입니다.");
         authorize();return reply(res,200,{...result,readOnly:roomIsReadOnly(room,user.id)});
+      }
+      const mediaMatch=url.pathname.match(/^\/api\/rooms\/([a-f0-9-]{36})\/workspace\/media(?:\/(microphone\/ticket))?$/);
+      if(mediaMatch){
+        limit("desktop-media:"+user.id,60);
+        const roomId=mediaMatch[1];
+        let result;
+        if(!mediaMatch[2]&&method==="GET")result=await desktopMediaHub.status(user,roomId);
+        else if(mediaMatch[2]==="microphone/ticket"&&method==="POST")result=await desktopMediaHub.ticket(user,roomId);
+        else throw failure(405,"허용되지 않은 요청입니다.");
+        const current=userFor(req);
+        if(!current||current.sessionHash!==user.sessionHash||!hostAdmin.authorized(current.id))throw failure(403,"마이크 연결 권한을 확인해주세요.");
+        assertRoomWritable(roomFor(roomId,current),current.id);
+        return reply(res,method==="POST"?201:200,result);
       }
       const workspaceMatch=url.pathname.match(/^\/api\/rooms\/([a-f0-9-]{36})\/workspace(?:\/(browser\/frame|browser\/action|browser\/input-regions|terminal\/ticket|files|file))?$/);
       if(workspaceMatch){
@@ -2239,6 +2256,7 @@ export async function startCommunity(options = {}) {
   });
   desktopHub=createDesktopHub({server,desktops,userFor,roomFor,touch:room=>provisioner.touch(desktops.sharedRoomId || room),originFor:req=>requestOrigins.forRequest(req)});
   workspaceHub=createWorkspaceHub({server,desktops,userFor,roomFor,touch:room=>provisioner.touch(desktops.sharedRoomId || room),originFor:req=>requestOrigins.forRequest(req),fetchImpl:options.workspaceFetch});
+  desktopMediaHub=createDesktopMediaHub({server,desktops,userFor,roomFor:(id,user)=>{const room=roomFor(id,user);assertRoomWritable(room,user.id);return room;},isOwner:user=>hostAdmin.authorized(user.id),originFor:req=>requestOrigins.forRequest(req),fetchImpl:options.desktopMediaFetch});
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
   await new Promise((done, reject) => {
@@ -2278,6 +2296,7 @@ export async function startCommunity(options = {}) {
         for(const clients of progressClients.values())for(const client of [...clients])client.close();
         desktopHub.close();
         workspaceHub.close();
+        desktopMediaHub.close();
         await mobileHub.close();
         await browserTools.close();
         await push.close();

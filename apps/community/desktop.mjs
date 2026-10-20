@@ -59,6 +59,7 @@ export function createDesktopHub({server, desktops, userFor, roomFor, originFor,
     try {
       url=new URL(req.url,'http://local');
       if(/^\/api\/rooms\/[a-f0-9-]{36}\/workspace\/terminal\/ws$/.test(url.pathname))return;
+      if(/^\/api\/rooms\/[a-f0-9-]{36}\/workspace\/media\/microphone\/ws$/.test(url.pathname))return;
       const match=url.pathname.match(/^\/api\/rooms\/([a-f0-9-]{36})\/desktop\/ws$/);
       if(!match) return reject(socket,404);
       if(!originFor(req)||req.headers.origin!==originFor(req)) return reject(socket,403);

@@ -14,10 +14,20 @@ ws_port="${DESKTOP_WEBSOCKET_PORT:-6080}"
 cdp_port="${DESKTOP_CDP_PORT:-9222}"
 start_url="${DESKTOP_START_URL:-about:blank}"
 
-xvfb_pid= openbox_pid= vnc_pid= ws_pid= cdp_pid= browser_pid= workspace_pid=
+xvfb_pid= openbox_pid= vnc_pid= ws_pid= cdp_pid= browser_pid= workspace_pid= media_pid= media_bridge_pid=
 Xvfb "$display" -screen 0 "$screen" -nolisten tcp -ac >/run/desktop/xvfb.log 2>&1 &
 xvfb_pid=$!
-trap 'kill "$xvfb_pid" "$openbox_pid" "$vnc_pid" "$ws_pid" "$cdp_pid" "$browser_pid" "$workspace_pid" 2>/dev/null || true' INT TERM EXIT
+trap 'kill "$xvfb_pid" "$openbox_pid" "$vnc_pid" "$ws_pid" "$cdp_pid" "$browser_pid" "$workspace_pid" "$media_bridge_pid" "$media_pid" 2>/dev/null || true' INT TERM EXIT
+
+# Devices belong to this virtual computer. The microphone starts muted and has
+# no physical input. Only local Unix clients can reach this PulseAudio daemon.
+export PULSE_RUNTIME_PATH=/run/desktop/pulse
+export PULSE_SERVER=unix:/run/desktop/pulse/native
+/usr/local/bin/desktop-media run >/run/desktop/pulse.log 2>&1 &
+media_pid=$!
+/usr/local/bin/desktop-media wait || { tail -n 20 /run/desktop/pulse.log >&2; exit 1; }
+/usr/local/bin/desktop-media-bridge >/run/desktop/media-bridge.log 2>&1 &
+media_bridge_pid=$!
 
 # Internal-only native files and PTY transport. Runs with the same desktop UID.
 /usr/bin/python3 /usr/local/bin/workspace-bridge >/run/desktop/workspace-bridge.log 2>&1 &

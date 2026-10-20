@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Sound
+Comment=Virtual computer speakers and microphone settings
+Exec=pavucontrol
+Icon=multimedia-volume-control
+Terminal=false

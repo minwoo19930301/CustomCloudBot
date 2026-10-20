@@ -3,6 +3,7 @@ import {configureDesktopInput,enterDesktopScreen} from './desktop-screen.js';
 import {createWorkspaceWindows,workspaceBounds} from './workspace-windows.js';
 import {createRemoteKeyboard} from './remote-keyboard.js';
 import {createMobileWorkspace} from './mobile-workspace.js';
+import {createDesktopMediaControls} from './desktop-media.js';
 let popupLayer=40;
 const VIEWS=[['browser','브라우저'],['mobile','모바일'],['terminal','터미널'],['files','파일']];
 const el=(tag,text,className)=>{const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
@@ -78,7 +79,8 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
   tabs.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const available=[...buttons.values()].filter(button=>!button.disabled),index=available.indexOf(document.activeElement);let next=event.key==='Home'?0:event.key==='End'?available.length-1:(index+(event.key==='ArrowRight'?1:-1)+available.length)%available.length;available[next]?.focus();available[next]?.click();});
   const bar=el('div',undefined,'workspace-statusbar'),status=el('span','','desktop-status'),retry=actionButton('작업 공간 다시 연결','다시 연결');status.setAttribute('role','status');bar.append(status,retry);
   const content=el('div',undefined,'workspace-content');content.setAttribute('role','tabpanel');
-  panel.append(head,tabs,content,bar,resize);document.body.append(panel);layout(geometry);
+  const mediaControls=el('div',undefined,'workspace-media-slot');
+  panel.append(head,tabs,mediaControls,content,bar,resize);document.body.append(panel);layout(geometry);
   const setStatus=(message,kind='')=>{status.textContent=message;status.dataset.kind=kind;};
   const stop=()=>{state.generation++;state.abort?.abort();state.abort=null;state.cleanup?.();state.cleanup=null;};
   const current=generation=>!state.destroyed&&state.generation===generation&&!panel.hidden&&!document.hidden;
@@ -100,6 +102,7 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
       const available=await api(base,{signal:abort.signal});if(!current(generation))return;
       for(const [id,button] of buttons)button.disabled=id!=='mobile'&&available[id]!==true;
       if(available[state.view]!==true){empty('이 보기는 아직 연결되지 않았습니다.');setStatus('다시 연결하여 상태를 확인할 수 있습니다.');return;}
+      createDesktopMediaControls({mount:mediaControls,api,roomId,signal:abort.signal});
       if(state.view==='browser')state.cleanup=mountBrowser(base,generation,abort.signal);
       else if(state.view==='files')state.cleanup=mountFiles(base,roomId,generation,abort.signal);
       else{
