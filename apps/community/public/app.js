@@ -3,7 +3,7 @@ import { createComposerRecorder } from "/composer-recorder.mjs";
 import { createComposerSuggestions } from "/composer-suggestions.mjs";
 import { renderMessageText } from "/message-format.mjs";
 import { renderTranscript, disposeTranscript } from "/transcript.mjs";
-import { recommendedModels, modelLabel, filterModels } from "/model-picker.mjs";
+import { recommendedModels, modelLabel, filterModels, createModelIcon, modelDetail } from "/model-picker.mjs";
 import { createDesktopUI } from "/desktop.js";
 import { createPwaController } from "/pwa.js";
 import { applyBrand, createBotSetupUI } from "/setup.js";
@@ -2158,6 +2158,7 @@ function applyModels(models) {
       trigger.onclick=()=>openRecommendedModels(select,trigger);select.after(trigger);select._triggerButton=trigger;select.classList.add("custom-model-select");
     }
     setPickerTrigger(select._triggerButton,select.value?(select.selectedOptions[0]?.textContent||"모델"):"자동 선택");
+    select._triggerButton.prepend(createModelIcon(current || {value:"",id:""}));
     select.title="추천 모델 · 자동 선택은 연결 상태에 따라 순환합니다";
   }
   decorateEffortPickers();
@@ -2187,6 +2188,7 @@ function openComposerPicker(trigger,title,options,{after}={}) {
     const button=contextElement("button",undefined,"picker-option"+(option.danger?" is-danger":""));button.type="button";button.setAttribute("role",typeof option.selected==="boolean"?"menuitemradio":"menuitem");if(typeof option.selected==="boolean")button.setAttribute("aria-checked",String(option.selected));
     const copy=contextElement("span",undefined,"picker-option-copy");copy.append(contextElement("span",option.label,"picker-option-label"));
     if(option.detail)copy.append(contextElement("span",option.detail,"picker-option-detail"));
+    if(option.model)button.append(createModelIcon(option.model));
     button.append(copy,contextElement("span",option.selected?"✓":"","picker-check"));
     button.onclick=()=>{closeComposerPicker(true);option.select();};element.append(button);
   }
@@ -2216,7 +2218,7 @@ function openRecommendedModels(select,trigger){
   if(select.disabled)return;
   const entries=[{value:"",id:"",name:"자동 선택"},...recommendedModels(state.models)];
   const current=state.models.find(m=>m.value===select.value);if(current&&!entries.some(m=>m.value===current.value))entries.push(current);
-  openComposerPicker(trigger,"모델",entries.map(model=>({label:model.value?modelLabel(model):"자동 선택",detail:model.value?(model.providers||[]).join(" · "):"연결된 모델 중에서 자동으로 선택",selected:select.value===model.value,select:()=>void requestModelChange(select,model.value)})),{after:{label:"전체 모델 검색",select:()=>openModelBrowser(select,trigger)}});
+  openComposerPicker(trigger,"모델",entries.map(model=>({model,label:model.value?modelLabel(model):"자동 선택",detail:model.value?modelDetail(model):"연결된 공급자를 순환하며 선택 · 실패하면 자동 전환",selected:select.value===model.value,select:()=>void requestModelChange(select,model.value)})),{after:{label:"전체 모델 검색",select:()=>openModelBrowser(select,trigger)}});
 }
 function decorateEffortPickers() {
   for(const select of $$(".effort-select")) {
@@ -2255,8 +2257,9 @@ function openModelBrowser(select,trigger,{onChoose}={}) {
     for(const model of matching.slice(0,count)){
       const button=document.createElement("button");button.type="button";button.className="model-card";button.setAttribute("aria-pressed",String(select.value===model.value));
       const name=document.createElement("strong"),detail=document.createElement("span"),badge=document.createElement("small");
-      name.textContent=modelLabel(model);detail.textContent=(model.providers||[]).join(" · ");badge.textContent=select.value===model.value?"선택됨":recommended.has(model.value)?"추천":model.id;
-      button.append(name,detail,badge);button.title=model.id;
+      name.textContent=modelLabel(model);detail.textContent=modelDetail(model);badge.textContent=select.value===model.value?"선택됨":recommended.has(model.value)?"추천":model.id;
+      const copy=contextElement("span",undefined,"model-card-copy");copy.append(name,detail,badge);
+      button.append(createModelIcon(model),copy);button.title=model.id;
       button.onclick=()=>{modelBrowser.close();if(onChoose)void onChoose(model.value);else void requestModelChange(select,model.value);};results.append(button);
     }
     load.hidden=count>=matching.length;

@@ -254,3 +254,45 @@ test('discovery excludes specialty endpoints even when their IDs do not say embe
  assert.deepEqual((await pool.listModels()).models.map(model=>model.id),['gemini-chat']);
  assert.equal(pool.choose('','').model,'gemini-chat');
 });
+
+test('live catalog metadata reaches the picker without adding models or changing automatic routes',async()=>{
+ const pool=createProviderPool({GROQ_API_KEY:'groq-private',OPENROUTER_API_KEY:'router-private'},async url=>({
+  ok:true,status:200,json:async()=>({data:url.includes('groq')?[
+   {id:'openai/gpt-oss-120b',created:1754000000,owned_by:'OpenAI'},
+   {id:'openai/gpt-oss-20b',created:1754000000,owned_by:'OpenAI'},
+  ]:[
+   {id:'openai/gpt-oss-120b',name:'OpenAI: GPT-OSS 120B',created:1756000000},
+   {id:'google/gemma-3-27b-it:free',name:'Google: Gemma 3',created:1742000000},
+   {id:'anthropic/claude-sonnet-4-5',name:'Anthropic: Claude Sonnet 4.5',created:1759000000},
+  ]}),
+ }));
+ const listed=await pool.listModels(), published=publicModels(listed);
+ assert.deepEqual(published.map(model=>model.id),[
+  'anthropic/claude-sonnet-4-5','openai/gpt-oss-120b','openai/gpt-oss-20b','google/gemma-3-27b-it:free',
+ ]);
+ const oss=published.find(model=>model.id==='openai/gpt-oss-120b');
+ assert.equal(oss.makerId,'openai');assert.equal(oss.catalogCreatedAt,1754000000);
+ assert.equal(oss.name,'OpenAI: GPT-OSS 120B');assert.deepEqual(oss.providers,['groq','openrouter']);
+ assert.ok(!JSON.stringify(published).includes('private'));
+ assert.deepEqual(publicModels({models:[...listed.models].reverse()}),published,'parallel completion order cannot shuffle the public catalog');
+ for(let i=0;i<3;i++) {
+  const choice=pool.choose('','');
+  assert.ok(choice.attempts.every(model=>model.provider!=='openrouter'||model.model.endsWith(':free')||model.model==='openrouter/free'));
+  assert.equal(choice.attempts.find(model=>model.provider==='groq').model,'openai/gpt-oss-120b');
+ }
+ assert.equal(pool.choose('anthropic/claude-sonnet-4-5','').provider,'openrouter','paid model stays explicitly selectable');
+ assert.equal(pool.choose('not-returned-by-any-api',''),null);
+});
+
+test('Gemini display names and missing timestamps survive discovery honestly',async()=>{
+ const pool=createProviderPool({GEMINI_API_KEY:'private-key'},async()=>({
+  ok:true,status:200,json:async()=>({models:[
+   {name:'models/gemini-2.0-flash',displayName:'Gemini 2.0 Flash',supportedGenerationMethods:['generateContent']},
+   {name:'models/gemini-2.5-flash',displayName:'Gemini 2.5 Flash',supportedGenerationMethods:['generateContent']},
+  ]}),
+ }));
+ const published=publicModels(await pool.listModels());
+ assert.deepEqual(published.map(model=>model.id),['gemini-2.5-flash','gemini-2.0-flash']);
+ assert.equal(published[0].name,'Gemini 2.5 Flash');assert.equal(published[0].makerId,'google');
+ assert.ok(published.every(model=>model.catalogCreatedAt===undefined && model.snapshotDate===undefined));
+});

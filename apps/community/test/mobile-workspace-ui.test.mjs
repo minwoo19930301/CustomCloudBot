@@ -166,7 +166,36 @@ test('a successful send finishing after the popup closes clears its retained dra
   assert.equal(draft.value,'');assert.equal(draft.pending,false);
 });
 
-test('unconfigured mobile shows a useful Korean explanation without waking or hiding the room chat',async()=>{
-  const {mount}=dom(),requests=[];const view=createMobileWorkspace({mount,roomId:'room-A',api:async path=>{requests.push(path);throw Object.assign(new Error('Mobile devices are not connected'),{code:'MOBILE_NOT_CONFIGURED',status:503});},mobileChat:{load:async()=>({messages:[],readOnly:false}),send:async()=>{}}});
-  await flush();assert.match(find(mount,'mobile-screen-message').textContent,/이 서버의 Android 실행 환경이 아직 준비되지 않았습니다/);assert.equal(buttonBy(mount,'모바일 깨우기').disabled,true);assert.equal(find(mount,'mobile-chat-input').disabled,false);assert.deepEqual(requests,['/api/rooms/room-A/mobile']);view.destroy();
+test('unconfigured mobile explains server setup without claiming retry will fix it or hiding the room chat',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {mount}=dom(),requests=[],statuses=[];const view=createMobileWorkspace({mount,roomId:'room-A',api:async path=>{requests.push(path);throw Object.assign(new Error('Mobile devices are not connected'),{code:'MOBILE_NOT_CONFIGURED',status:503});},onStatus:(message,kind)=>statuses.push({message,kind}),mobileChat:{load:async()=>({messages:[],readOnly:false}),send:async()=>{}}});
+  t.after(()=>view.destroy());
+  await flush();
+  const message=find(mount,'mobile-screen-message').textContent;
+  assert.equal(message,'모바일 기기가 아직 연결되지 않았습니다. 서버의 Android 설정이 필요합니다.');
+  assert.deepEqual(statuses,[{message,kind:''}]);
+  assert.equal(find(mount,'mobile-workspace').dataset.state,'unavailable');
+  assert.equal(buttonBy(mount,'모바일 깨우기').disabled,true);
+  assert.equal(find(mount,'mobile-chat-input').disabled,false);
+  t.mock.timers.tick(5000);await flush();
+  assert.deepEqual(requests,['/api/rooms/room-A/mobile']);
+});
+
+test('temporary mobile connection errors retain retry guidance and recover on the next status check',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {mount}=dom(),requests=[],statuses=[];
+  const view=createMobileWorkspace({mount,roomId:'room-A',api:async path=>{
+    requests.push(path);
+    if(requests.length===1)throw Object.assign(new Error('Temporary connection failure'),{code:'MOBILE_UNAVAILABLE',status:503});
+    return {device:{state:'sleeping'},readOnly:true};
+  },onStatus:(message,kind)=>statuses.push({message,kind})});
+  t.after(()=>view.destroy());
+  await flush();
+  assert.match(find(mount,'mobile-screen-message').textContent,/잠시 후 다시 연결/);
+  assert.equal(statuses.at(-1).kind,'error');
+  t.mock.timers.tick(5000);await flush();
+  assert.equal(requests.length,2);
+  assert.equal(find(mount,'mobile-workspace').dataset.state,'sleeping');
+  assert.match(find(mount,'mobile-screen-message').textContent,/휴면 중/);
+  assert.equal(statuses.at(-1).kind,'');
 });

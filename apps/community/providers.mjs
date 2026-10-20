@@ -1,3 +1,5 @@
+import { catalogModelMetadata, sortModelsNewest } from "./public/model-catalog.mjs";
+
 export const EFFORTS = ["low", "medium", "high", "xhigh"];
 const validModel = (value) => typeof value === "string" && /^[\w.:/@+-]{1,200}$/.test(value) ? value : "";
 const NON_CHAT_MODEL = /whisper|orpheus|prompt-guard|safeguard|embedding|embed-|rerank|retriever|native-audio|live-preview|image|vision|audio|speech|transcri(?:be|ption)|moderation|reward|(?:^|[\/.-])(?:tts|asr|guard|clip|siglip|bge|e5|flux|parakeet|diffdock|genmol|boltz|alphafold|esmfold|fourcastnet|cuopt|maisi)(?:[\/.-]|$)|stable-diffusion/i;
@@ -107,7 +109,7 @@ export function createProviderPool(env = {}, fetchImpl = fetch) {
       const id = configuredModel(provider);
       if (!id) return false;
       catalogs.set(provider.slot, new Set([id]));
-      models.push({provider:provider.name,slot:provider.slot,id,name:id,configured:true});
+      models.push({provider:provider.name,slot:provider.slot,id,name:id,configured:true,...catalogModelMetadata(null,id,provider.name)});
       return true;
     };
     await Promise.all(providers.map(async (provider) => {
@@ -144,7 +146,8 @@ export function createProviderPool(env = {}, fetchImpl = fetch) {
             provider: provider.name,
             slot: provider.slot,
             id,
-            name: typeof row?.name === "string" ? row.name.slice(0, 120) : id,
+            name: typeof row?.displayName === "string" ? row.displayName.slice(0, 120) : typeof row?.name === "string" ? row.name.slice(0, 120) : id,
+            ...catalogModelMetadata(row,id,provider.name),
           });
         }
         catalogs.set(provider.slot, ids);
@@ -224,12 +227,19 @@ export function createProviderPool(env = {}, fetchImpl = fetch) {
 export function publicModels(listed) {
   const grouped = new Map();
   for (const model of listed.models) {
-    const row = grouped.get(model.id) || { value: model.id, id: model.id, name: model.name, providers: [], ...(model.configured ? {configured:true} : {}) };
+    const metadata=catalogModelMetadata({created:model.catalogCreatedAt},model.id,model.provider);
+    const row = grouped.get(model.id) || { value: model.id, id: model.id, name: model.name, providers: [], ...metadata, ...(model.configured ? {configured:true} : {}) };
     if (!model.configured) delete row.configured;
     if (!row.providers.includes(model.provider)) row.providers.push(model.provider);
+    if(model.makerId && model.makerId!=="other" && row.makerId==="other") row.makerId=model.makerId;
+    // Re-listing the same model on a second host must not make it look newer.
+    if(metadata.catalogCreatedAt) row.catalogCreatedAt=row.catalogCreatedAt ? Math.min(row.catalogCreatedAt,metadata.catalogCreatedAt) : metadata.catalogCreatedAt;
+    const names=[row.name,model.name].filter(name=>typeof name==="string" && name!==model.id);
+    if(names.length) row.name=names.sort()[0];
     grouped.set(model.id, row);
   }
-  return [...grouped.values()];
+  for(const row of grouped.values()) row.providers.sort();
+  return sortModelsNewest([...grouped.values()]);
 }
 
 export function formatModelList(listed) {
