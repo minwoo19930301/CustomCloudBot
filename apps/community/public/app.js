@@ -167,6 +167,11 @@ function messageProfile(message) {
   return message.authorId===state.session?.user?.id ? state.session.user : message;
 }
 function renderAccountTools() {
+  if (!$("#delete-all-conversations")) {
+    const button=document.createElement("button");button.id="delete-all-conversations";button.type="button";button.className="profile-menu-item";button.textContent="내 대화 전체 삭제";
+    button.onclick=()=>{closeProfileMenu();void openDeleteAllConversations();};
+    $("#restore-conversations").after(button);
+  }
   const admin=state.session?.user?.role==="admin";
   $$("[data-admin-tool]",$("#profile-menu")).forEach(button=>button.classList.toggle("is-hidden",!admin));
   $("#open-dashboard").classList.toggle("is-hidden",!state.rooms.some(room=>room.id===MONITOR_ROOM&&!room.archived));
@@ -591,6 +596,32 @@ function confirmRemoveConversation(room) {
   const buttons = contextElement("div", undefined, "session-delete-actions"); buttons.append(cancel, confirm);
   dialog.append(title, text, buttons); dialog.onclose = () => dialog.remove(); document.body.append(dialog); dialog.showModal(); cancel.focus();
 }
+async function openDeleteAllConversations() {
+  const userId=state.session?.user?.id,epoch=sidebarEpoch;
+  try {
+    const preview=await api("/api/conversations/delete-preview");
+    if(userId!==state.session?.user?.id||epoch!==sidebarEpoch)return;
+    if(!preview.count){toast("삭제할 대화가 없습니다.");return;}
+    const dialog=document.createElement("dialog");dialog.className="quick-model-picker session-delete-dialog";dialog.setAttribute("aria-label","내 대화 전체 삭제");
+    const title=contextElement("h2","내 대화를 전부 삭제할까요?");
+    const detail=contextElement("p",`보관된 대화를 포함해 내가 만든 대화 ${preview.count}개, 메시지 ${preview.messages}개, 첨부 ${preview.attachments}개를 영구 삭제합니다. 복원할 수 없습니다.${preview.shared ? ` 공동 대화 ${preview.shared}개는 다른 참여자에게서도 삭제됩니다.` : ""}`);
+    const note=contextElement("p","계정·봇 설정·메일함과 다른 사람이 만든 대화는 유지됩니다.");
+    const cancel=contextElement("button","취소"),confirm=contextElement("button","전체 영구 삭제","session-delete-confirm");cancel.type=confirm.type="button";
+    cancel.onclick=()=>dialog.close();
+    confirm.onclick=async()=>{
+      if(userId!==state.session?.user?.id||epoch!==sidebarEpoch){dialog.close();return;}
+      confirm.disabled=true;
+      try {
+        const result=await api("/api/conversations/delete-all",{method:"POST",body:JSON.stringify({fingerprint:preview.fingerprint})});
+        if(userId!==state.session?.user?.id||epoch!==sidebarEpoch){dialog.close();return;}
+        state.rooms=state.rooms.filter(room=>!result.roomIds.includes(room.id));state.forks=state.forks.filter(link=>!result.roomIds.includes(link.id));
+        showDeletedRooms=false;showEmpty();dialog.close();
+        toast(`${result.deleted}개 대화를 영구 삭제했습니다.${result.pendingFiles||result.pendingCleanup ? " 일부 연결·파일 정리는 다시 확인해야 합니다." : ""}`);
+      }catch(error){detail.textContent=error.message;confirm.disabled=false;}
+    };
+    const actions=contextElement("div",undefined,"session-delete-actions");actions.append(cancel,confirm);dialog.append(title,detail,note,actions);dialog.onclose=()=>dialog.remove();document.body.append(dialog);dialog.showModal();cancel.focus();
+  }catch(error){toast(error.message);}
+}
 function bindSessionTitle(element,getRoomId) {
   element.classList.add("session-title");element.setAttribute("role","button");element.tabIndex=0;
   element.title="클릭하여 제목 변경";
@@ -691,10 +722,26 @@ function syncSessionColors(colors = sessionColors(state.rooms, state.forks)) {
   paintSession($(".topbar"),colors.get(state.selectedRoom));
 }
 function focusSidebarBranch(roomId) {
+  const changed=sidebarBranchFocus!==roomId;
   sidebarBranchFocus=roomId || null;
   const graphList=$(".branch-graph",els.roomList);if(!graphList)return;
   const graph=layoutBranches(state.rooms.filter(room=>room.id!==MONITOR_ROOM),state.forks,{order:sidebarState.roomOrder,query:sessionSearch});
+  const geometry=branchGraphGeometry(graph,{focusRoomId:sidebarBranchFocus||currentBranchId(),visibleLaneCount:3});
+  const paths=new Map(geometry.paths.map(path=>[branchEdgeKey(path.from,path.to),path]));
+  const nodes=new Map(geometry.nodes.map(node=>[node.id,node]));
+  const svg=$(".branch-lines",graphList);svg?.setAttribute("width",geometry.width);
+  graphList.style.setProperty("--branch-rail",(geometry.width+4)+"px");
+  for(const path of $$(".branch-path,.branch-path-hit",graphList)) {
+    const item=paths.get(branchEdgeKey(path.dataset.branchFrom,path.dataset.branchTo));if(!item)continue;
+    path.setAttribute("d",item.d);path.setAttribute("visibility",item.visible===false?"hidden":"visible");
+    if(path.classList.contains("branch-path-hit"))path.setAttribute("tabindex",item.visible===false?"-1":"0");
+  }
   const flow=branchFocus(graph,sidebarBranchFocus);
+  for(const node of $$(".branch-node",graphList)) {
+    const item=nodes.get(node.dataset.roomId);if(!item)continue;
+    node.setAttribute("cx",item.x);node.setAttribute("visibility",item.visible===false?"hidden":"visible");
+    node.classList.toggle("is-flow-focused",!!flow?.roomIds.has(item.id));node.classList.toggle("is-flow-muted",!!flow&&!flow.roomIds.has(item.id));
+  }
   graphList.classList.toggle("has-branch-focus",!!flow);
   for(const row of $$(".branch-row",graphList)) {
     row.classList.toggle("is-flow-focused",!!flow?.roomIds.has(row.dataset.roomId));
@@ -705,6 +752,7 @@ function focusSidebarBranch(roomId) {
     path.classList.toggle("is-flow-focused",active);path.classList.toggle("is-flow-muted",!!flow&&!active);
   }
   for(const hit of $$(".branch-path-hit",graphList)) hit.setAttribute("aria-pressed",String(sidebarBranchFocus===hit.dataset.roomId));
+  if(changed&&roomId)$$(".branch-row",graphList).find(row=>row.dataset.roomId===roomId)?.scrollIntoView({block:"nearest",behavior:"instant"});
 }
 function renderRooms() {
   const focus = els.roomList.contains(document.activeElement) ? {roomId: document.activeElement.dataset.roomId, action: document.activeElement.dataset.branchAction, from:document.activeElement.dataset.branchFrom} : null;
@@ -715,25 +763,26 @@ function renderRooms() {
   const openIds = sidebarOpenRoomIds(), focusedId = currentBranchId();
   const graph = layoutBranches(state.rooms.filter(room => room.id !== MONITOR_ROOM), state.forks, {order:sidebarState.roomOrder,query:sessionSearch});
   const graphList = document.createElement("div"); graphList.className = "branch-graph";
-  const geometry = branchGraphGeometry(graph);
-  graphList.style.setProperty("--branch-rail", (geometry.paths.length ? geometry.width : 12) + "px");
-  const svg = branchSvg("svg", {class:"branch-lines", width:geometry.width, height:geometry.height, role:"group", "aria-label":"대화 연결선"});
+  const geometry = branchGraphGeometry(graph,{focusRoomId:sidebarBranchFocus||focusedId,visibleLaneCount:3});
+  graphList.style.setProperty("--branch-rail", (geometry.width+4) + "px");
+  const svg = branchSvg("svg", {class:"branch-lines is-windowed", width:geometry.width, height:geometry.height, role:"group", "aria-label":"대화 연결선"});
   const byId = new Map(graph.rows.map(row => [row.id,row]));
   for (const edge of geometry.paths) {
     svg.append(branchSvg("path", {d:edge.d, "data-branch-from":edge.from, "data-branch-to":edge.to, "aria-hidden":"true", style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`, class:`branch-path${edge.secondary ? " is-merge" : ""}${edge.from===currentBranchId()||edge.to===currentBranchId()?" is-current":""}`}));
   }
   for (const edge of geometry.paths) {
-    const hit=branchSvg("path",{d:edge.d,class:"branch-path-hit",style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`,role:"button",tabindex:0,"data-room-id":edge.to,"data-branch-from":edge.from,"data-branch-action":"focus-flow","aria-label":`${byId.get(edge.from)?.room.name}에서 ${byId.get(edge.to)?.room.name}로 이어지는 흐름 강조`,"aria-pressed":"false"});
+    const hit=branchSvg("path",{d:edge.d,class:"branch-path-hit",style:`--branch-color:${colors.get(edge.to)?.color || "currentColor"}`,role:"button",tabindex:0,"data-room-id":edge.to,"data-branch-from":edge.from,"data-branch-to":edge.to,"data-branch-action":"focus-flow","aria-label":`${byId.get(edge.from)?.room.name}에서 ${byId.get(edge.to)?.room.name}로 이어지는 흐름 강조`,"aria-pressed":"false"});
     hit.onclick=event=>{event.stopPropagation();focusSidebarBranch(sidebarBranchFocus===edge.to?null:edge.to);};
     hit.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();event.stopPropagation();focusSidebarBranch(sidebarBranchFocus===edge.to?null:edge.to);}};
     svg.append(hit);
   }
+  for(const node of geometry.nodes)svg.append(branchSvg("circle",{cx:node.x,cy:node.y,r:1.75,class:`branch-node${node.id===focusedId?" is-current":""}`,"data-room-id":node.id,"aria-hidden":"true",style:`--branch-color:${colors.get(node.id)?.color||"currentColor"}`}));
   graphList.onclick=event=>{if(event.target===graphList||event.target===svg)focusSidebarBranch(null);};
   graphList.onkeydown=event=>{if(event.key==="Escape"){event.stopPropagation();focusSidebarBranch(null);}};
   for (const row of graph.rows) {
     const open = openIds.has(row.id), active = open && focusedId === row.id;
     const button = document.createElement("button"); button.type="button"; button.className="branch-row"; button.dataset.roomId=row.id; button.dataset.dockRoom=row.id;
-    button.style.setProperty("--branch-row-rail",((geometry.paths.length?geometry.width:12)+Math.min(row.depth,3)*6)+"px");
+
     button.classList.toggle("is-open",open); button.classList.toggle("is-selected",active); button.classList.toggle("is-ancestor",!row.matched); if(active)button.setAttribute("aria-current","page");
     const copy=document.createElement("span"); copy.className="branch-row-copy";
     const name=document.createElement("strong"); name.textContent=branchDisplayName(row);

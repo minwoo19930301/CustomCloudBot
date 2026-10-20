@@ -107,7 +107,7 @@ export function branchFocus({rows = [], edges = []} = {}, roomId) {
 }
 
 /** Keep curved branch joins away from other row nodes, including after a drag. */
-export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {rowHeight = 44, maxWidth = 72} = {}) {
+export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {rowHeight = 44, maxWidth = 72, focusRoomId = null, visibleLaneCount = null} = {}) {
   const step = 12, origin = 10;
   const nodes = rows.map(row => ({id: row.id, x: origin + row.lane * step, y: row.index * rowHeight + rowHeight / 2}));
   const byId = new Map(nodes.map(node => [node.id, node]));
@@ -140,6 +140,34 @@ export function branchGraphGeometry({rows = [], edges = [], laneCount = 0}, {row
     paths.push({...edge, d});
   }
   const naturalWidth = Math.max(30, right + (routes.length ? 10 + (routes.length - 1) * 8 : 0) + 12);
+  if (Number.isFinite(visibleLaneCount) && visibleLaneCount >= 1) {
+    // Pan a narrow rail across the original geometry instead of squeezing all
+    // generations into it. Rows and their recorded relationships never change.
+    const count = Math.min(Math.max(1, laneCount), Math.floor(visibleLaneCount));
+    const focus = rows.find(row => row.id === focusRoomId);
+    const firstLane = Math.max(0, Math.min(Math.max(0, laneCount - count), (focus?.lane ?? 0) - Math.floor(count / 2)));
+    const offsetX = firstLane * step;
+    // Half a lane beyond the last node keeps the next lane and merge detours
+    // outside the clip, so a three-lane rail never becomes four at the edge.
+    const width = origin + (count - 1) * step + step / 2;
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index], lane = rows[index].lane;
+      node.x -= offsetX;
+      node.visible = lane >= firstLane && lane < firstLane + count;
+    }
+    for (const path of paths) {
+      const xs = [];
+      path.d = path.d.replace(/(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/g, (_, x, y) => {
+        const projected = Number(x) - offsetX;
+        xs.push(projected);
+        return `${projected},${y}`;
+      });
+      // The SVG clips crossing curves. Entirely offscreen paths should also be
+      // omitted from keyboard tab order by the renderer.
+      path.visible = Math.max(...xs) >= 0 && Math.min(...xs) <= width;
+    }
+    return {nodes, paths, width, height: rows.length * rowHeight, viewport: {firstLane, laneCount: count, offsetX}};
+  }
   const width = Math.min(naturalWidth, Number.isFinite(maxWidth) ? Math.max(30, maxWidth) : 72);
   if (width < naturalWidth) {
     // All routes are resolved before the shared x transform, preserving the

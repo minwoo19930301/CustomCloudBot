@@ -27,7 +27,7 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
   const dialog = document.querySelector("#pwa-dialog");
   const dialogTitle = document.querySelector("#pwa-dialog-title");
   const dialogMessage = document.querySelector("#pwa-dialog-message");
-  const state = { session: null, registration: null, config: null, subscription: null, deferredInstall: null, epoch: 0, pushBusy: false, installBusy: false, installed: false, destroyed: false, appOrigin: "", installHelpShown: false,
+  const state = { session: null, registration: null, config: null, subscription: null, deferredInstall: null, epoch: 0, pushBusy: false, installBusy: false, installed: false, destroyed: false, installHelpShown: false,
     supported: window.isSecureContext !== false && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window };
   const current = (epoch) => !state.destroyed && state.epoch === epoch && Boolean(state.session?.user?.id) && (!getSession || getSession()?.user?.id === state.session.user.id);
   const showDialog = (title, message) => {
@@ -36,15 +36,17 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
     dialogMessage.textContent = message;
     if (!dialog.open) dialog.showModal();
   };
-  const showInstallHelp = () => { const help = installationHelp(navigator); showDialog(help.title, help.message); };
+  const showInstallHelp = () => {
+    const help = installationHelp(navigator);
+    showDialog(help.title, `${help.message}\n\n앱은 현재 열어 둔 주소(${window.location.origin})로 설치됩니다.`);
+  };
   const renderInstall = () => {
     const standalone = isStandalone();
     installButtons.forEach((button) => {
       button.classList.remove("is-hidden");
       button.hidden = false;
-      const alternate=state.appOrigin && state.appOrigin!==window.location?.origin;
-      button.disabled = state.installBusy || (!alternate && (standalone || state.installed));
-      button.textContent = alternate ? "앱으로 만들기" : standalone ? "앱으로 사용 중" : state.installed ? "앱 설치됨" : state.deferredInstall ? "앱으로 설치" : "앱으로 만들기";
+      button.disabled = state.installBusy || standalone || state.installed;
+      button.textContent = standalone ? "앱으로 사용 중" : state.installed ? "앱 설치됨" : state.deferredInstall ? "앱으로 설치" : "앱으로 만들기";
     });
   };
   const renderPush = () => {
@@ -152,13 +154,6 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
   };
   const install = async () => {
     if (state.installBusy) return;
-    if (state.appOrigin && state.appOrigin!==window.location?.origin) {
-      const destination = state.appOrigin+"/?install=1";
-      // Keep the installed window inside its scope when installing another origin.
-      if (isStandalone()) window.open(destination, "_blank", "noopener,noreferrer");
-      else window.location.assign(destination);
-      return;
-    }
     if (isStandalone() || state.installed) return;
     const prompt = state.deferredInstall;
     if (!prompt) { showInstallHelp(); return; }
@@ -183,12 +178,12 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
   renderInstall();
   renderPush();
   return {
-    setAppOrigin(value) {
-      state.appOrigin="";
-      try { const url=new URL(value);if(url.protocol==="https:" && url.origin===value)state.appOrigin=value; } catch {}
+    setAppOrigin(_value) {
+      // Compatibility hook for the session's legacy app-origin setting. That
+      // server allowlist does not choose where this browser installs its PWA.
+      // Each permitted origin installs its own manifest without cross-origin navigation.
       renderInstall();
-      // Never automatically move an installed app to another origin: it leaves its scope.
-      if(!isStandalone() && state.appOrigin===window.location?.origin && window.location?.search?.includes("install=1") && !state.installHelpShown) {
+      if(!isStandalone() && window.location?.search?.includes("install=1") && !state.installHelpShown) {
         state.installHelpShown=true;showInstallHelp();
       }
       return false;

@@ -8,12 +8,15 @@
 .branch-current { padding:0 16px; margin:7px 0 12px; color:#88848f; font-size:10px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .branch-graph { position:relative; margin:0 0 8px; }
 .branch-lines { position:absolute; top:0; left:0; pointer-events:none; z-index:2; overflow:visible; }
+.branch-lines.is-windowed { overflow:hidden; }
 .branch-color-0 { --branch-color:#b7a0ed; }
 .branch-color-1 { --branch-color:#d995b7; }
 .branch-color-2 { --branch-color:#74b6b0; }
-.branch-graph .branch-path { stroke:var(--branch-color); stroke-width:1.25; stroke-linecap:round; stroke-linejoin:round; fill:none; opacity:.30; transition:opacity 180ms ease; }
+.branch-graph .branch-path { stroke:var(--branch-color); stroke-width:1; stroke-linecap:round; stroke-linejoin:round; fill:none; opacity:.30; transition:opacity 180ms ease; vector-effect:non-scaling-stroke; }
 .branch-graph .branch-path.is-merge { stroke-dasharray:none; opacity:.40; }
-.branch-graph .branch-path.is-current { opacity:.72; stroke-width:1.5; }
+.branch-graph .branch-path.is-current { opacity:.72; stroke-width:1.05; }
+.branch-graph .branch-node { fill:var(--branch-color); opacity:.5; pointer-events:none; transition:opacity 180ms ease; }
+.branch-graph .branch-node.is-current { opacity:.82; }
 .branch-row { position:relative; z-index:1; display:flex; align-items:center; width:100%; height:44px; margin:0; padding:5px 10px 5px var(--branch-row-rail,var(--branch-rail)); color:var(--text); background:transparent; border:0; border-radius:8px; text-align:left; cursor:pointer; transition:background 150ms ease; }
 .branch-row:hover { background:#ffffff06; }
 .branch-row.is-selected { background:#b7a0ed0e; }
@@ -27,7 +30,9 @@
 .branch-row-copy, .branch-row .session-drag-handle { transition:opacity 180ms ease; }
 /* Focus changes the trace; every session remains readable and selectable. */
 .branch-graph.has-branch-focus .branch-path.is-flow-muted { opacity:.06; }
-.branch-graph.has-branch-focus .branch-path.is-flow-focused { opacity:.92; stroke-width:1.6; }
+.branch-graph.has-branch-focus .branch-path.is-flow-focused { opacity:.92; stroke-width:1.1; }
+.branch-graph.has-branch-focus .branch-node.is-flow-muted { opacity:.08; }
+.branch-graph.has-branch-focus .branch-node.is-flow-focused { opacity:.92; }
 .branch-graph.has-branch-focus .branch-row.is-flow-muted .branch-row-copy,
 .branch-graph.has-branch-focus .branch-row.is-flow-muted .session-drag-handle { opacity:.42; }
 .branch-graph.has-branch-focus .branch-row.is-flow-muted.is-open .branch-row-copy { opacity:.55; }
@@ -35,7 +40,7 @@
 .branch-graph.has-branch-focus .branch-row.is-flow-muted:hover .branch-row-copy,
 .branch-graph.has-branch-focus .branch-row.is-flow-muted:focus-visible .branch-row-copy { opacity:1; }
 .branch-graph .branch-path-hit { fill:none; stroke:transparent; stroke-width:14; stroke-linecap:round; stroke-linejoin:round; pointer-events:stroke; cursor:pointer; }
-.branch-graph .branch-path-hit:focus-visible { outline:none; stroke:var(--branch-color); stroke-width:4; stroke-opacity:.35; }
+.branch-graph .branch-path-hit:focus-visible { outline:none; stroke:var(--branch-color); stroke-width:2; stroke-opacity:.35; }
 .branch-list-footer { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; padding:12px 4px 0; border-top:1px solid #ffffff07; margin-top:12px; }
 .branch-list-footer .deleted-rooms-toggle { margin:0; padding:6px 4px; width:auto; flex:1; white-space:nowrap; text-align:left; }
 .branch-reset { background:transparent; color:#716c77; padding:6px 4px; font-size:10px; cursor:pointer; }
@@ -76,5 +81,5 @@ body.session-dragging, body.session-dragging * { cursor:grabbing!important; user
 }
 @media(prefers-reduced-motion:reduce) {
   .branch-graph .branch-row.is-working { animation:none; box-shadow:inset 0 0 0 1px rgba(var(--pane-tint,145,119,195),.34),0 0 10px rgba(var(--pane-tint,145,119,195),.14); }
-  .branch-graph .branch-path, .branch-row-copy, .branch-row .session-drag-handle { transition:none; }
+  .branch-graph .branch-path, .branch-graph .branch-node, .branch-row-copy, .branch-row .session-drag-handle { transition:none; }
 }

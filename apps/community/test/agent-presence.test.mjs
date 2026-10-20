@@ -168,3 +168,33 @@ test('real room polling acknowledges only newly completed successful work, once'
   assert.deepEqual(reactions,['complete'],'negative results do not trigger a success gesture');
   assert.equal(context.presenceErrors.has('room-1'),true);
 });
+
+test('a polite refusal drives the actual error avatar and stays until the next request', () => {
+  const app = setup(), appSource = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = appSource.indexOf('function observeRoomOutcome(');
+  const functionSource = appSource.slice(start, appSource.indexOf('async function optimisticMessage(', start));
+  const context = {state:{rooms:[]}, syncSessionActivity(){}, failedOutcome, presenceTurns:new Map(), presenceErrors:new Set(), presenceBusy:new Set(), pendingMessages:new Map(), agentPresence:app.controller};
+  vm.runInNewContext(functionSource + '\nthis.observe=observeRoomOutcome;', context);
+  const room = {id:'room-1'}, human = {id:'human-1', kind:'human', text:'작업해줘'};
+  const refusal = {id:'bot-1', kind:'bot', text:'죄송합니다만, 해당 요청은 도와드릴 수 없습니다.'};
+  const render = data => {
+    context.observe(data);
+    app.controller.set(resolveAgentPresence({rooms:[{busy:data.busy}], hasError:context.presenceErrors.has(room.id)}));
+  };
+  render({room, busy:true, messages:[human]});
+  assert.equal(app.character.src, '/media/agent/working.webp');
+  render({room, busy:false, messages:[human, refusal]});
+  assert.equal(app.character.src, '/media/agent/error.webp');
+  app.controller.react('complete'); app.finishReaction();
+  app.controller.react('typing');
+  render({room, busy:false, messages:[human, refusal]});
+  assert.equal(app.character.src, '/media/agent/error.webp', 'polls and completion/typing gestures cannot dismiss a refusal');
+  assert.equal(app.mount.dataset.reaction, '');
+  const next = {...human, id:'human-2'};
+  render({room, busy:true, messages:[human, refusal, next]});
+  assert.equal(context.presenceErrors.has(room.id), false);
+  assert.equal(app.character.src, '/media/agent/working.webp');
+  render({room, busy:false, messages:[human, refusal, next, {id:'bot-2', kind:'bot', text:'확인을 마쳤습니다.'}]});
+  app.finishReaction();
+  assert.equal(app.character.src, '/media/agent/idle.webp');
+});

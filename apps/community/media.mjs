@@ -139,13 +139,18 @@ export async function cleanupOrphans(db, mediaDir, ttlMs = 24 * 3600000) {
   // concurrent message cannot bind an attachment whose file is being removed.
   const remove = db.prepare("DELETE FROM attachments WHERE id=? AND bound_at IS NULL AND created_at<?");
   const expired = rows.filter(row => remove.run(row.id,cutoff).changes === 1);
-  for (const row of expired) await unlink(row.path).catch(() => {});
+  // Forks have their own attachment IDs but keep the original file path.
+  // Check every remaining reference before removing either expired or orphaned bytes.
+  const referenced = db.prepare("SELECT 1 FROM attachments WHERE path=? LIMIT 1");
+  for (const path of new Set(expired.map(row => row.path))) {
+    if (!referenced.get(path)) await unlink(path).catch(() => {});
+  }
   for (const name of await readdir(mediaDir).catch(() => [])) {
     if (!name.startsWith(".upload-") && !/^[a-f0-9-]{36}$/.test(name)) continue;
     const path = join(mediaDir, name);
     const info = await stat(path).catch(() => null);
     if (!info || info.mtimeMs >= cutoff) continue;
-    if (name.startsWith(".upload-") || !db.prepare("SELECT 1 FROM attachments WHERE id=?").get(name)) await unlink(path).catch(() => {});
+    if (name.startsWith(".upload-") || !referenced.get(path)) await unlink(path).catch(() => {});
   }
 }
 

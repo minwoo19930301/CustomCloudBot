@@ -90,7 +90,7 @@ test('unsupported browser retains notification guidance without sending a test p
 });
 
 
-test('configured app origin changes only the install destination until explicitly clicked', async () => {
+test('legacy app origin never redirects current-domain installation or discards its prompt', async () => {
   const app = setup({ url: 'https://bots.example.test/?room=private-room#invite=private-token' });
   let prompts = 0;
   app.window.handlers.beforeinstallprompt({ preventDefault() {}, prompt: async () => { prompts++; }, userChoice: Promise.resolve({ outcome: 'accepted' }) });
@@ -102,13 +102,16 @@ test('configured app origin changes only the install destination until explicitl
     assert.equal(app.nodes.get(id).disabled, false);
     await app.nodes.get(id).handlers.click();
   }
-  assert.deepEqual(app.navigations, ['https://192.0.2.10/?install=1', 'https://192.0.2.10/?install=1']);
-  assert.deepEqual(app.opened, [], 'regular browser installation keeps same-window navigation');
-  assert.equal(prompts, 0, 'a deferred domain install prompt must not be used for the IP app');
+  assert.deepEqual(app.navigations, []);
+  assert.deepEqual(app.opened, []);
+  assert.equal(prompts, 1, 'the current domain install prompt is preserved');
+  assert.equal(app.window.location.href, 'https://bots.example.test/?room=private-room#invite=private-token');
+  assert.match(app.nodes.get('pwa-dialog-message').textContent, /현재 열어 둔 주소\(https:\/\/bots\.example\.test\)/);
+  assert.doesNotMatch(app.nodes.get('pwa-dialog-message').textContent, /192\.0\.2\.10|private-room|private-token/);
   assert.equal(app.calls.length, 0);
 });
 
-test('alternate-origin installation preserves standalone scope but navigates a regular browser after appinstalled', async () => {
+test('legacy app origin cannot re-enable installation or navigate an already installed app', async () => {
   for (const standalone of [false, true]) {
     const url = 'https://bots.example.test/?room=private-room#invite=private-token';
     const app = setup({ standalone, url });
@@ -117,17 +120,12 @@ test('alternate-origin installation preserves standalone scope but navigates a r
     app.controller.setAppOrigin('https://192.0.2.10');
     assert.deepEqual(app.navigations, [], 'setting configuration must never redirect an installed app');
     assert.deepEqual(app.opened, [], 'setting configuration must not open another window');
-    assert.equal(app.nodes.get('install-button').disabled, false);
-    assert.equal(app.nodes.get('install-button').textContent, '앱으로 만들기');
+    assert.equal(app.nodes.get('install-button').disabled, true);
+    assert.equal(app.nodes.get('install-button').textContent, standalone ? '앱으로 사용 중' : '앱 설치됨');
     for (const id of ['install-button', 'auth-install-button']) await app.nodes.get(id).handlers.click();
-    if (standalone) {
-      assert.deepEqual(app.navigations, [], 'a null window.open result must never fall back to leaving app scope');
-      assert.equal(app.window.location.href, url);
-      assert.deepEqual(app.opened, Array.from({length: 2}, () => ['https://192.0.2.10/?install=1', '_blank', 'noopener,noreferrer']));
-    } else {
-      assert.deepEqual(app.navigations, ['https://192.0.2.10/?install=1', 'https://192.0.2.10/?install=1']);
-      assert.deepEqual(app.opened, []);
-    }
+    assert.deepEqual(app.navigations, []);
+    assert.equal(app.window.location.href, url);
+    assert.deepEqual(app.opened, []);
     assert.equal(app.calls.length, 0);
   }
 });
@@ -148,7 +146,7 @@ test('same-origin installed apps keep install disabled without navigation or OS 
   }
 });
 
-test('malformed or non-HTTPS app origins are cleared and cannot become navigation destinations', async () => {
+test('legacy app origin values cannot become installation navigation destinations', async () => {
   for (const value of [undefined, null, '', 'not a URL', '/relative', '//192.0.2.10', 'http://192.0.2.10', 'javascript:alert(1)', 'https://name:password@192.0.2.10', 'https://192.0.2.10/', 'https://192.0.2.10/path', 'https://192.0.2.10?redirect=https://other.example', 'https://192.0.2.10#fragment', ' https://192.0.2.10']) {
     const app = setup();
     app.controller.setAppOrigin('https://192.0.2.10');
@@ -159,11 +157,13 @@ test('malformed or non-HTTPS app origins are cleared and cannot become navigatio
   }
 });
 
-test('the explicit IP installation page shows browser help once without triggering installation', () => {
-  const app = setup({ url: 'https://192.0.2.10/?install=1' });
+test('the current-domain installation page shows browser help once even with a legacy IP origin', () => {
+  const app = setup({ url: 'https://bots.example.test/?install=1' });
   app.controller.setAppOrigin('https://192.0.2.10');
   assert.equal(app.nodes.get('pwa-dialog').open, true);
   assert.match(app.nodes.get('pwa-dialog-message').textContent, /Chrome 메뉴/);
+  assert.match(app.nodes.get('pwa-dialog-message').textContent, /https:\/\/bots\.example\.test/);
+  assert.doesNotMatch(app.nodes.get('pwa-dialog-message').textContent, /192\.0\.2\.10/);
   app.nodes.get('pwa-dialog').close();
   app.controller.setAppOrigin('https://192.0.2.10');
   assert.equal(app.nodes.get('pwa-dialog').open, false);

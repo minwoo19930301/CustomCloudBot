@@ -27,6 +27,7 @@ import { createRoutines } from "./routines.mjs";
 import { verifyMail } from "./mail-auth.mjs";
 import { SUBSCRIPTION_CONNECTIONS } from "./subscription-connections.mjs";
 import { createSidebarStore } from "./sidebar.mjs";
+import { createConversationDeletion } from "./conversation-delete.mjs";
 import { createConversationActivity } from "./conversation-activity.mjs";
 import { loadOperatorContext } from "./operator-context.mjs";
 import { createWorkspaceHub, workspacePath } from "./workspace.mjs";
@@ -259,6 +260,10 @@ export async function startCommunity(options = {}) {
   const titleJobs = new Set();
   const suggestionJobs = new Set();
   const suggestionCache = createNextPromptCache();
+  const conversationDeletion = createConversationDeletion({db,mediaDir,excludedRoomIds:[MONITOR_ROOM],
+    isBusy:id=>roomJobs.has(id)||messageQueue.has(id)||titleJobs.size>0||suggestionJobs.size>0,
+    onDeleted:id=>{roomProgress.delete(id);modelStates.delete(id);finishProgress(id);},
+  });
   const controllers = new Set();
   let closing = false;
   let queueDrainTimer, queueDrainPromise, queueDrainRequested=false;
@@ -1796,6 +1801,13 @@ export async function startCommunity(options = {}) {
             limit: dailyLimit,
           },
         });
+      }
+      if (url.pathname === "/api/conversations/delete-preview" && method === "GET") {
+        return reply(res,200,conversationDeletion.preview(user.id));
+      }
+      if (url.pathname === "/api/conversations/delete-all" && method === "POST") {
+        limit("delete-conversations:"+user.id,3);
+        return reply(res,200,await conversationDeletion.removeAll(user.id,body.fingerprint));
       }
       if(url.pathname==="/api/sessions/reset" && method==="POST") {
         limit("reset:"+user.id,3);

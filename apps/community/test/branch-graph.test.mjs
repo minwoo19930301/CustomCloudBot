@@ -216,6 +216,70 @@ test('many simultaneous branches and merge routes fit the sidebar without changi
   assert.deepEqual(graph.rows,rows);
 });
 
+test('a three-lane window follows the selected generation without compressing or hiding session rows', () => {
+  const r = Array.from({length:12}, (_,index) => ({id:`r${index}`,name:`r${index}`,createdAt:index}));
+  const l = r.slice(1).map((room,index) => ({id:room.id,parent:r[index].id}));
+  const graph = layoutBranches(r,l), original = structuredClone(graph);
+  const natural = branchGraphGeometry(graph,{maxWidth:1000});
+  const middle = branchGraphGeometry(graph,{focusRoomId:'r6',visibleLaneCount:3});
+  assert.equal(middle.width,40);
+  assert.equal(middle.viewport.firstLane,5);
+  assert.equal(middle.viewport.laneCount,3);
+  assert.deepEqual(middle.nodes.filter(node=>node.visible).map(node=>node.id),['r5','r6','r7']);
+  assert.deepEqual(middle.nodes.filter(node=>node.visible).map(node=>node.x),[10,22,34]);
+  assert.equal(middle.nodes.length,graph.rows.length);
+  assert.equal(middle.paths.length,graph.edges.length);
+  assert.deepEqual(middle.nodes.map(node=>node.y),natural.nodes.map(node=>node.y));
+  for(const focusRoomId of ['r0','r1','r10','r11']) {
+    const geometry=branchGraphGeometry(graph,{focusRoomId,visibleLaneCount:3});
+    const selected=geometry.nodes.find(node=>node.id===focusRoomId);
+    assert.equal(selected.visible,true);
+    assert.ok(selected.x>=0&&selected.x<=geometry.width);
+    assert.ok(new Set(geometry.nodes.filter(node=>node.visible).map(node=>node.x)).size<=3);
+  }
+  assert.equal(branchGraphGeometry(graph,{focusRoomId:'r0',visibleLaneCount:3}).viewport.firstLane,0);
+  assert.equal(branchGraphGeometry(graph,{focusRoomId:'r11',visibleLaneCount:3}).viewport.firstLane,9);
+  assert.equal(branchGraphGeometry(graph,{focusRoomId:'missing',visibleLaneCount:3}).viewport.firstLane,0);
+  assert.deepEqual(graph,original);
+});
+
+test('windowed branches preserve sibling and merge endpoints while flagging invisible input targets', () => {
+  const graph=layoutBranches(rooms,links,{order:['merge','b','deep','root','a','other']});
+  const natural=branchGraphGeometry(graph,{maxWidth:1000});
+  const windowed=branchGraphGeometry(graph,{focusRoomId:'merge',visibleLaneCount:3});
+  const nodes=new Map(windowed.nodes.map(node=>[node.id,node]));
+  assert.equal(windowed.viewport.firstLane,1);
+  assert.equal(nodes.get('root').visible,false);
+  assert.equal(nodes.get('other').visible,false);
+  assert.equal(nodes.get('a').x,nodes.get('b').x);
+  assert.equal(nodes.get('merge').visible,true);
+  assert.deepEqual(windowed.paths.map(({from,to,secondary})=>({from,to,secondary})),graph.edges);
+  for(const path of windowed.paths) {
+    const from=nodes.get(path.from),to=nodes.get(path.to);
+    assert.ok(path.d.startsWith(`M${from.x},${from.y}`));
+    assert.ok(path.d.endsWith(`${to.x},${to.y}`)||path.d.endsWith(`V${to.y}`));
+  }
+  assert.deepEqual(windowed.nodes.map(node=>node.y),natural.nodes.map(node=>node.y));
+  const chain=layoutBranches(Array.from({length:7},(_,i)=>({id:String(i)})),Array.from({length:6},(_,i)=>({id:String(i+1),parent:String(i)})));
+  const tail=branchGraphGeometry(chain,{focusRoomId:'6',visibleLaneCount:3});
+  assert.equal(tail.paths.find(path=>path.from==='0').visible,false);
+  assert.equal(tail.paths.find(path=>path.from==='3').visible,true,'a crossing edge remains visible through the clip');
+  assert.deepEqual(tail.nodes.filter(node=>node.visible).map(node=>node.id),['4','5','6']);
+});
+
+test('a lane window uses only existing lanes and hides merge detours beyond the last lane', () => {
+  const graph={rows:[{id:'root',lane:0,index:0},{id:'middle',lane:0,index:1},{id:'merge',lane:0,index:2}],edges:[{from:'root',to:'merge',secondary:true}],laneCount:1};
+  const result=branchGraphGeometry(graph,{focusRoomId:'merge',visibleLaneCount:3});
+  assert.equal(result.viewport.laneCount,1);
+  assert.equal(result.viewport.firstLane,0);
+  assert.equal(result.width,16);
+  assert.ok(result.paths[0].d.includes('20,'),'the collision-free route is preserved outside the viewport');
+  assert.ok(result.width<20,'the detour does not add another visible vertical rail');
+  assert.ok(result.nodes.every(node=>node.visible&&node.x===10));
+  const empty=branchGraphGeometry({rows:[],edges:[],laneCount:0},{visibleLaneCount:3});
+  assert.deepEqual(empty.nodes,[]);assert.deepEqual(empty.paths,[]);assert.equal(empty.height,0);
+});
+
 test('display names remove generated trailing lineage only for recorded fork or merge rows', () => {
   const named = (name,operation)=>({room:{name},operation});
   assert.equal(branchDisplayName(named('신규 대화 시작 · Fork · Fork · Merge','merge')),'신규 대화 시작');
