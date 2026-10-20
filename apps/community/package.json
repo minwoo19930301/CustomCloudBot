@@ -6,7 +6,7 @@
   "main": "server.mjs",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs deploy/mobile/*.test.mjs",
     "build": "node build.mjs"
   },
   "dependencies": {

@@ -99,3 +99,33 @@ Before upgrading an existing installation that used a site-specific tracked mani
 Validate new configurations with `config --quiet`, check `/api/health` against the expected release, and verify authenticated browser, file and terminal views. Back up SQLite using its backup API before releases; retain prior images for rollback. Credentials, populated vaults and private manifests must never enter Git or a container build context.
 
 References: [Compose variable interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/), [Caddy environment variables](https://caddyserver.com/docs/caddyfile/concepts#environment-variables), [OpenClaw custom providers](https://docs.openclaw.ai/concepts/model-providers/custom-providers).
+
+### Mobile workspace on the existing application host
+
+The workspace has Browser, Terminal, Files and Mobile views. Mobile shows the
+actual Android screen and the same room's AI conversation; it does not imitate
+an iPhone home screen. Each room maps to a separate persistent Android device.
+Forks receive a new device when opened; they do not copy another room's app logins.
+
+The optional [private Android pool](mobile/README.md) belongs on the same machine
+as the application. Verify the host kernel, image, input method and capacity before
+enabling it. An ARM CPU and spare RAM alone do not make a host Android-compatible:
+Redroid requires Android Binder support in the host kernel. A disabled
+`CONFIG_ANDROID_BINDER_IPC` is a deployment blocker; do not claim a working phone
+or automatically replace the host kernel/reboot a production service.
+
+Use `MOBILE_BROKER_SOCKET=/run/community-mobile/mobile.sock` and a private
+`MOBILE_BROKER_TOKEN` in the app's private environment. Bind-mount only
+`/run/community-mobile:/run/community-mobile:ro` into the application backend;
+match the broker socket's group to the backend's host-visible UID. Do not mount
+Docker or ADB sockets into the public app or desktop. No external phone port,
+Cloudflare route, new VM or separate region is needed. The checked-in configuration
+is intentionally unconnected. HTTPS is also available for an operator-selected
+separate deployment, but no remote host is chosen by default.
+
+Default pool limits are ten saved devices and two running devices, subject to
+verified host capacity. Closing the workspace stops screen polling; idle devices
+sleep without deleting their data. AI task leases keep their active device awake.
+Opening a writable room's Mobile tab or invoking its AI mobile tools wakes only
+that room's device. Read-only fork sources remain viewable but cannot wake, type
+or launch applications. Existing room membership and CSRF protection apply.

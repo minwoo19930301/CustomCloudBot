@@ -2697,7 +2697,26 @@ notificationUI = createNotificationCenter({ mount: $("#notification-center"), ap
     ? [state.selectedRoom, ...state.extra.map(pane => pane.roomId)].filter(Boolean) : [],
   openRoom: async id => { await loadRooms(); await selectRoom(id); }, toast });
 pwaUI = createPwaController({ api, getSession: () => state.session, toast });
-desktopUI = createDesktopUI({ api, getRoomId: () => state.selectedRoom, getRoomName: id => state.rooms.find(room=>room.id===id)?.name || "대화", toast });
+desktopUI = createDesktopUI({ api, getRoomId: () => state.selectedRoom, getRoomName: id => state.rooms.find(room=>room.id===id)?.name || "대화", toast,
+  mobileChat:{
+    load:async (roomId,{signal}={})=>{
+      const data=await api(`/api/rooms/${encodeURIComponent(roomId)}`,{signal});
+      return {messages:data.messages,readOnly:!!data.room?.readOnly,busy:!!data.busy};
+    },
+    send:async (roomId,text)=>{
+      const prefs=roomPreferences(roomId),pane=state.extra.find(item=>item.roomId===roomId),selected=roomId===state.selectedRoom;
+      const result=await api(`/api/rooms/${encodeURIComponent(roomId)}/messages`,{method:"POST",retryable:true,body:JSON.stringify({
+        text,clientNonce:crypto.randomUUID(),queueIfBusy:true,
+        model:selected?$("#model-select").value:pane?.model||prefs.model||"",effort:selected?$("#effort-select").value:pane?.effort||prefs.effort||"",
+        botIds:[state.selectedBots[0]||state.bots[0]?.id].filter(Boolean)
+      })});
+      agentPresence?.react("send");
+      if(result.models)applyModels(result.models);
+      if(selected)void refreshRoom(true);refreshExtras();void loadRooms();
+      return result;
+    }
+  }
+});
 profileUI = createProfileSettings({api,getSession:()=>state.session,toast,onSaved: user=>{
   state.session.user=user;$("#profile-name").textContent=user.displayName;renderUserAvatar($("#profile-avatar"),user);
   if(state.roomData)renderRoom(state.roomData);refreshExtras();

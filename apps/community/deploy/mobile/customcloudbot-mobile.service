@@ -1,0 +1,30 @@
+[Unit]
+Description=CustomCloudBot private Android device pool
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=customcloudbot-mobile
+Group=customcloudbot-mobile
+SupplementaryGroups=docker
+RuntimeDirectory=community-mobile
+RuntimeDirectoryMode=0750
+WorkingDirectory=/opt/customcloudbot-mobile
+EnvironmentFile=/etc/customcloudbot-mobile.env
+ExecStart=/usr/bin/node /opt/customcloudbot-mobile/service.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/customcloudbot-mobile
+ReadWritePaths=/run/community-mobile
+Environment=HOME=/var/lib/customcloudbot-mobile
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

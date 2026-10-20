@@ -2,8 +2,9 @@ import {createWorkspaceTerminal} from './workspace-terminal.js';
 import {configureDesktopInput,enterDesktopScreen} from './desktop-screen.js';
 import {createWorkspaceWindows,workspaceBounds} from './workspace-windows.js';
 import {createRemoteKeyboard} from './remote-keyboard.js';
+import {createMobileWorkspace} from './mobile-workspace.js';
 let popupLayer=40;
-const VIEWS=[['browser','브라우저'],['terminal','터미널'],['files','파일']];
+const VIEWS=[['browser','브라우저'],['mobile','모바일'],['terminal','터미널'],['files','파일']];
 const el=(tag,text,className)=>{const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
 const actionButton=(label,text=label)=>{const button=el('button',text,'workspace-button');button.type='button';button.setAttribute('aria-label',label);button.title=label;return button;};
 
@@ -36,11 +37,11 @@ async function boundedFile(url,signal,max=8*1024*1024) {
 }
 
 /** Independent room popups share the existing remote computer. */
-export function createDesktopUI({api,getRoomId,getRoomName=()=>'',toast=()=>{},mount=null,initialView='browser',onViewChange=()=>{}}) {
+export function createDesktopUI({api,getRoomId,getRoomName=()=>'',toast=()=>{},mount=null,initialView='browser',onViewChange=()=>{},mobileChat=null}) {
   const topbar=mount?.querySelector('.pane-bar')||document.querySelector('.topbar-actions');
   const toggle=actionButton('작업 공간 열기','▣');toggle.className='icon-button desktop-button';toggle.setAttribute('aria-expanded','false');toggle.hidden=true;topbar?.append(toggle);
   const windows=createWorkspaceWindows({
-    createWindow:(roomId,options)=>createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,...options}),
+    createWindow:(roomId,options)=>createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,mobileChat,...options}),
     onLimit:()=>toast('열어둔 작업 공간 하나를 닫은 뒤 다시 열어주세요.'),
     onChange:({roomId,open})=>{toggle.hidden=!roomId;toggle.setAttribute('aria-expanded',String(open));},
   });
@@ -53,8 +54,8 @@ export function createDesktopUI({api,getRoomId,getRoomName=()=>'',toast=()=>{},m
     destroy(){windows.destroy();toggle.remove();},
   };
 }
-function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,index,onClose}) {
-  const state={roomId,view:VIEWS.some(([id])=>id===initialView)?initialView:'browser',generation:0,abort:null,cleanup:null,destroyed:false,keyboardOpen:false,paths:new Map()};
+function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,mobileChat,index,onClose}) {
+  const state={roomId,view:VIEWS.some(([id])=>id===initialView)?initialView:'browser',generation:0,abort:null,cleanup:null,destroyed:false,keyboardOpen:false,mobileDraft:{value:'',pending:false,revision:0},paths:new Map()};
   const panel=el('aside',undefined,'desktop-panel workspace-popup');panel.setAttribute('aria-label','작업 공간');panel.setAttribute('role','dialog');panel.dataset.roomId=roomId;panel.hidden=true;
   const head=el('div',undefined,'desktop-head'),title=el('strong','작업 공간'),actions=el('div',undefined,'workspace-window-actions'),fullscreen=actionButton('작업 공간 전체 화면','⛶'),maximize=actionButton('작업 공간 확대','□'),close=actionButton('작업 공간 닫기','×');close.classList.add('workspace-close');actions.append(fullscreen,maximize,close);head.append(title,actions);head.tabIndex=0;head.title='드래그하여 이동 · 방향키로 위치 이동';head.setAttribute('aria-label','작업 공간 창 이동');
   const resize=actionButton('작업 공간 크기 조절','');resize.className='workspace-resize-handle';resize.title='드래그 또는 방향키로 크기 조절';
@@ -92,8 +93,12 @@ function createWorkspaceWindow({api,roomId,getRoomName,initialView,onViewChange,
     content.setAttribute('aria-label',VIEWS.find(([id])=>id===state.view)?.[1]||'작업 공간');
     empty('작업 공간에 연결하는 중…');setStatus('연결 중…');
     try{
+      if(state.view==='mobile'){
+        const mobile=createMobileWorkspace({mount:content,api,roomId,signal:abort.signal,mobileChat,draft:state.mobileDraft,onStatus:(message,kind)=>{if(current(generation))setStatus(message,kind);},onExpand:expanded=>{if(expanded&&!beforeMaximize||!expanded&&beforeMaximize)setMaximized();},onKeyboard:keyboardLayout});
+        state.cleanup=()=>mobile.destroy();return;
+      }
       const available=await api(base,{signal:abort.signal});if(!current(generation))return;
-      for(const [id,button] of buttons)button.disabled=available[id]!==true;
+      for(const [id,button] of buttons)button.disabled=id!=='mobile'&&available[id]!==true;
       if(available[state.view]!==true){empty('이 보기는 아직 연결되지 않았습니다.');setStatus('다시 연결하여 상태를 확인할 수 있습니다.');return;}
       if(state.view==='browser')state.cleanup=mountBrowser(base,generation,abort.signal);
       else if(state.view==='files')state.cleanup=mountFiles(base,roomId,generation,abort.signal);
