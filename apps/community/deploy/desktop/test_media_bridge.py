@@ -28,7 +28,8 @@ class Player:
         self.closed = False
         self.stdin = SimpleNamespace(write=self.frames.append, drain=self.drain,
                                      close=lambda: setattr(self, "closed", True),
-                                     transport=SimpleNamespace(get_write_buffer_size=lambda: 0))
+                                     transport=SimpleNamespace(get_write_buffer_size=lambda: 0,
+                                                               abort=lambda: setattr(self, "closed", True)))
 
     async def drain(self):
         pass
@@ -43,18 +44,25 @@ class Player:
 class MediaBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.players, self.mutes = [], []
+        self.handlers = []
+        self.mute_barrier = None
+        self.cleanup_started = asyncio.Event()
         self.available = True
 
         def status():
             return {"audio": {"available": self.available, "microphoneMuted": not self.mutes or self.mutes[-1]}}
 
         async def player():
+            self.handlers.append(asyncio.current_task())
             item = Player()
             self.players.append(item)
             return item
 
         async def mute(value):
             self.mutes.append(value)
+            if value and self.mute_barrier is not None:
+                self.cleanup_started.set()
+                await self.mute_barrier.wait()
 
         self.client = TestClient(TestServer(bridge.create_app(status, player, mute, receive_timeout=0.3)))
         await self.client.start_server()
@@ -65,7 +73,7 @@ class MediaBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def settle(self):
         for _ in range(100):
-            if self.players and self.players[-1].closed:
+            if self.players and self.players[-1].closed and self.mutes[-1] is True:
                 return
             await asyncio.sleep(0.005)
         self.fail("Microphone player was not closed")
@@ -164,6 +172,40 @@ class MediaBridgeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await bridge.wait_player_ready(SimpleNamespace(returncode=1, pid=123))
 
+    async def test_disconnect_kills_player_before_waiting_for_mute(self):
+        self.mute_barrier = asyncio.Event()
+        ws = await self.client.ws_connect(self.route)
+        await ws.receive_json()
+        await ws.close()
+        await asyncio.wait_for(self.cleanup_started.wait(), 0.5)
+        self.assertEqual(self.players[0].returncode, -9)
+        self.assertTrue(self.players[0].closed)
+        # New input cannot enter before the previous mute/reap has finished.
+        with self.assertRaises(WSServerHandshakeError) as error:
+            await self.client.ws_connect(self.route)
+        self.assertEqual(error.exception.status, 409)
+        self.mute_barrier.set()
+        await self.settle()
+
+    async def test_request_cancellation_does_not_cancel_microphone_cleanup(self):
+        self.mute_barrier = asyncio.Event()
+        ws = await self.client.ws_connect(self.route)
+        await ws.receive_json()
+        self.handlers[0].cancel()
+        await asyncio.wait_for(self.cleanup_started.wait(), 0.5)
+        self.assertEqual(self.players[0].returncode, -9)
+        self.assertTrue(self.players[0].closed)
+        # Cancel again while the shielded mute is pending: cleanup remains alive.
+        self.handlers[0].cancel()
+        self.mute_barrier.set()
+        for _ in range(100):
+            state = await (await self.client.get("/status")).json()
+            if not state["microphone"]["connected"]:
+                break
+            await asyncio.sleep(0.005)
+        self.assertFalse(state["microphone"]["connected"])
+        self.assertTrue(self.mutes[-1])
+
     def test_trusted_socket_peers_only(self):
         for peer in ("127.0.0.1", "::1", "172.30.50.2", "::ffff:172.30.50.2"):
             self.assertTrue(bridge.allowed_peer(peer))
@@ -218,12 +260,19 @@ class RealPulseBridgeTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.sleep(0.04)
                         await wait_for_capture(initial_bytes + len(tone) * 20)
                         await ws.close()
-                        for _ in range(100):
-                            if players[0].returncode is not None:
-                                break
-                            await asyncio.sleep(0.02)
-                        self.assertIsNotNone(players[0].returncode)
+                        async with asyncio.timeout(2):
+                            while True:
+                                transport_state = await (await client.get("/status")).json()
+                                if not transport_state["microphone"]["connected"]:
+                                    break
+                                await asyncio.sleep(0.02)
                         state = await asyncio.to_thread(bridge.runtime.status)
+                        self.assertFalse(transport_state["microphone"]["connected"],
+                                         "Microphone cleanup did not release its reservation")
+                        self.assertIsNotNone(players[0].returncode,
+                            f"pacat pid={players[0].pid} alive after WS close; ws.closed={ws.closed}; "
+                            f"microphoneMuted={state['audio']['microphoneMuted']}; "
+                            f"microphoneConnected={state['audio']['microphoneConnected']}")
                         self.assertTrue(state["audio"]["microphoneMuted"])
                         self.assertFalse(state["audio"]["microphoneConnected"])
                         recorder.terminate()

@@ -105,6 +105,7 @@ def create_app(status_reader=runtime.status, player_factory=start_player,
                mute=set_mute, receive_timeout=8):
     active = None
     sessions = set()
+    cleanup_tasks = set()
     status_lock = asyncio.Lock()
     cached_status, cached_at = None, 0
 
@@ -187,27 +188,47 @@ def create_app(status_reader=runtime.status, player_factory=start_player,
             else:
                 raise web.HTTPServiceUnavailable(text="Virtual microphone unavailable")
         finally:
-            # Mute first; discard pacat's pending audio rather than draining it.
-            with contextlib.suppress(Exception):
-                await mute(True)
+            # Stop the producer before any await. A client disconnect can cancel
+            # this request while pactl is pending; it must never leave pacat alive.
             if player is not None:
                 if player.returncode is None:
                     with contextlib.suppress(ProcessLookupError):
                         player.kill()
-                await player.wait()
                 if player.stdin:
-                    player.stdin.close()
-            sessions.discard(ws)
-            if active is reservation:
-                active = None
-            cached_at = 0
+                    # close() may flush buffered PCM; abort discards it now.
+                    player.stdin.transport.abort()
+
+            async def finish_cleanup():
+                nonlocal active, cached_at
+                try:
+                    with contextlib.suppress(Exception):
+                        await mute(True)
+                    if player is not None:
+                        await player.wait()
+                finally:
+                    sessions.discard(ws)
+                    if active is reservation:
+                        active = None
+                    cached_at = 0
+
+            # Keep a strong reference and shield cleanup from HTTP handler
+            # cancellation. The reservation remains held until cleanup completes.
+            cleanup = asyncio.create_task(finish_cleanup())
+            cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(cleanup_tasks.discard)
+            await asyncio.shield(cleanup)
         return ws
 
     async def shutdown(_app):
         await asyncio.gather(*(ws.close(code=1001, message=b"Media bridge stopping") for ws in tuple(sessions)))
 
+    async def reap(_app):
+        if cleanup_tasks:
+            await asyncio.gather(*tuple(cleanup_tasks), return_exceptions=True)
+
     app = web.Application(middlewares=[private_network], client_max_size=MAX_FRAME)
     app.on_shutdown.append(shutdown)
+    app.on_cleanup.append(reap)
     app.router.add_get("/health", status)
     app.router.add_get("/status", status)
     app.router.add_get("/microphone", microphone)
