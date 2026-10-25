@@ -15,7 +15,7 @@ test('host service only starts on an authenticated private socket and closes cle
   const config=vmConfiguration({MOBILE_BROKER_TOKEN:TOKEN,MOBILE_VM_DATA_DIR:path.join(directory,'data'),MOBILE_LISTEN_SOCKET:socket});
   const running=new Set(),logs=[];
   const runtime={provision:async()=>{},start:async spec=>running.add(spec.roomId),stop:async spec=>running.delete(spec.roomId),isRunning:async spec=>running.has(spec.roomId)};
-  const service=await startVMBroker({config,runtime,request:async(spec,request)=>request.path==='/health'?{ok:true}:{device:{roomId:spec.roomId,state:'running'}},log:line=>logs.push(line)});
+  const service=await startVMBroker({config,runtime,request:async(spec,request)=>request.path==='/health'?{ok:true,runtimeRevision:config.expectedGuestRevision}:{device:{roomId:spec.roomId,state:'running'}},log:line=>logs.push(line)});
   t.after(async()=>{await Promise.all([...service.pool.starts.values()]);await service.close();await rm(directory,{recursive:true,force:true});});
   assert.equal(service.server.address(),socket);
   assert.equal((await stat(socket)).mode&0o777,0o660);
@@ -26,7 +26,7 @@ test('host service only starts on an authenticated private socket and closes cle
     });req.on('error',reject);req.end(method==='POST'?'{}':undefined);
   });
   assert.equal((await call('/health',{token:'incorrect'})).status,401);
-  assert.deepEqual((await call('/health')).data,{ok:true,slots:0,maxSlots:10,running:0,maxRunning:1});
+  assert.deepEqual((await call('/health')).data,{ok:true,slots:0,maxSlots:10,running:0,maxRunning:1,runtimeRevision:config.expectedGuestRevision});
   assert.equal((await call(`/devices/${ROOM}/wake`,{method:'POST'})).data.device.state,'starting');
   await service.pool.starts.get(ROOM);
   assert.equal((await call(`/devices/${ROOM}`)).data.device.state,'running');

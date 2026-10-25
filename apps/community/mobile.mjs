@@ -247,7 +247,10 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
   };
   const status = (roomId, options = {}) => request(route(roomId), { signal: options.signal });
   const waitForAndroid = async (roomId, options = {}) => {
-    let result = await wakeRaw(roomId, options);
+    // An already usable Android may still carry a keyboard warning. Only an
+    // explicit wake should retry that setup, not every AI observe/tap/launch.
+    let result = await status(roomId, options);
+    if (result.device?.state !== "running") result = await wakeRaw(roomId, options);
     const deadline = Date.now() + readyTimeoutMs;
     while (["starting", "booting"].includes(result.device?.state)) {
       await writable(roomId, options);

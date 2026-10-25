@@ -164,20 +164,63 @@ test("a room frozen while wake is pending cannot receive the queued AI input", a
   const f = await fixture(t, { assertWritable: async () => { if (readOnly) throw Object.assign(new Error("Frozen"), { code: "ROOM_READ_ONLY" }); } });
   f.setHandler((request, response) => { if (request.url.endsWith("/wake")) readOnly = true; json(response, { ok: true }); });
   await assert.rejects(f.hub.execute(ROOM, "mobile_tap", { x: 1, y: 2 }), error => error.code === "ROOM_READ_ONLY");
-  assert.deepEqual(f.requests.map(item => item.url), [`/devices/${ROOM}/wake`]);
+  assert.deepEqual(f.requests.map(item => item.url), [`/devices/${ROOM}`, `/devices/${ROOM}/wake`]);
 });
 
-test("AI tools wake their room, execute a validated action and read bounded untrusted UI", async t => {
+test("a room frozen while running-device status is pending cannot use the no-wake fast path to send input", async t => {
+  let readOnly = false;
+  const f = await fixture(t, { assertWritable: async () => { if (readOnly) throw Object.assign(new Error("Frozen"), { code: "ROOM_READ_ONLY" }); } });
+  f.setHandler((_request, response) => { readOnly = true; json(response, { device: { state: 'running' } }); });
+  await assert.rejects(f.hub.execute(ROOM, 'mobile_tap', { x: 1, y: 2 }), error => error.code === 'ROOM_READ_ONLY');
+  assert.deepEqual(f.requests.map(item => item.url), [`/devices/${ROOM}`]);
+});
+
+test("AI tools inspect readiness, execute a validated action and read bounded untrusted UI", async t => {
   const f = await fixture(t);
   const output = await f.hub.execute(ROOM, "mobile_tap", { x: 50, y: 60 });
   assert.match(output, /^\[UNTRUSTED ANDROID SCREEN\]/);
   assert.match(output, /Settings/);
-  assert.deepEqual(f.requests.map(item => [item.method, item.url]), [["POST", `/devices/${ROOM}/wake`], ["POST", `/devices/${ROOM}/input`], ["GET", `/devices/${ROOM}/observe`]]);
+  assert.deepEqual(f.requests.map(item => [item.method, item.url]), [["GET", `/devices/${ROOM}`], ["POST", `/devices/${ROOM}/input`], ["GET", `/devices/${ROOM}/observe`]]);
   const before = f.requests.length;
   for (const pkg of ["com.android.settings;id", "https://example.com/app.apk", "../app", "", "a".repeat(201)]) await assert.rejects(f.hub.execute(ROOM, "mobile_launch", { package: pkg }), error => error.code === "MOBILE_PACKAGE_INVALID");
   assert.equal(f.requests.length, before, "invalid tools must not wake a device");
   await f.hub.execute(ROOM, "mobile_launch", { package: "com.android.settings" });
   assert.deepEqual(f.requests.at(-2).body, { package: "com.android.settings" });
+});
+
+test("AI can observe and control a running Android with an IME warning without repeatedly retrying keyboard setup", async t => {
+  const f = await fixture(t);
+  f.setHandler((request, response) => {
+    if (request.url.endsWith('/observe')) return json(response, observation());
+    json(response, { device: { roomId: ROOM, state: 'running', lastError: 'device_keyboard_timeout' } });
+  });
+  await f.hub.startTask(ROOM);
+  for (const [name, args] of [['mobile_observe', {}], ['mobile_launch', { package: 'com.android.settings' }], ['mobile_tap', { x: 50, y: 60 }]]) {
+    const output = await f.hub.execute(ROOM, name, args);
+    assert.match(output, /Settings/);
+  }
+  assert.equal(f.requests.filter(item => item.url.endsWith('/wake')).length, 0);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/launch')).length, 1);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/input')).length, 1);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/lease') && item.body.active).length, 4, 'ready-device use still renews the active task lease');
+  await f.hub.wake(ROOM);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/wake')).length, 1, 'explicit UI wake still retries keyboard setup');
+  await f.hub.endTask(ROOM);
+});
+
+for (const initial of ['unallocated', 'sleeping', 'starting', 'booting']) test(`AI still wakes or joins its ${initial} Android before sending input`, async t => {
+  const f = await fixture(t, { readyPollMs: 1 });
+  let woke = false, polls = 0;
+  f.setHandler((request, response) => {
+    if (request.url.endsWith('/observe')) return json(response, observation());
+    if (request.url.endsWith('/wake')) { woke = true; return json(response, { device: { state: 'starting' } }); }
+    if (request.method === 'GET') return json(response, { device: { state: woke ? ++polls < 2 ? 'starting' : 'running' : initial } });
+    assert.ok(woke && polls >= 2, 'input cannot precede real Android readiness');
+    json(response, { ok: true });
+  });
+  await f.hub.execute(ROOM, 'mobile_key', { key: 'HOME' });
+  assert.equal(f.requests.filter(item => item.url.endsWith('/wake')).length, 1);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/input')).length, 1);
 });
 
 test("UI wake returns preparing immediately while AI waits for Android before sending input", async t => {
@@ -195,7 +238,7 @@ test("UI wake returns preparing immediately while AI waits for Android before se
   await f.hub.execute(ROOM, 'mobile_key', { key: 'HOME' });
   assert.equal(polls, 3);
   assert.deepEqual(f.requests.slice(1).map(request => request.url), [
-    `/devices/${ROOM}/wake`, `/devices/${ROOM}`, `/devices/${ROOM}`, `/devices/${ROOM}`,
+    `/devices/${ROOM}`, `/devices/${ROOM}/wake`, `/devices/${ROOM}`, `/devices/${ROOM}`,
     `/devices/${ROOM}/input`, `/devices/${ROOM}/observe`,
   ]);
 });
