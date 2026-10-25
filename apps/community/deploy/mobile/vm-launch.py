@@ -45,7 +45,7 @@ def launch_args(room, base=BASE, uid=None):
             "-netdev", "user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:" + str(spec["port"]) + "-:8091",
             "-device", "virtio-net-pci,netdev=net0",
             "-object", "rng-random,filename=/dev/urandom,id=rng0", "-device", "virtio-rng-pci,rng=rng0,max-bytes=1024,period=1000",
-            "-display", "none", "-serial", "none", "-monitor", "none",
+            "-display", "none", "-chardev", "ringbuf,id=bootlog,size=131072", "-serial", "chardev:bootlog", "-monitor", "none",
             "-qmp", "unix:/run/customcloudbot-mobile-vm/" + room + "/qmp.sock,server=on,wait=off", "-nodefaults", "-no-reboot"]
 
 

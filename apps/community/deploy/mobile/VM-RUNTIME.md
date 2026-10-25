@@ -79,7 +79,7 @@ Read-only inspection of the existing OCI host confirmed the following setup:
 | Data root and base | root:ccb-mobile-vm (UID 0 / GID 986), 0750 |
 | Host broker unit | `User=root`, `Group=opc`, loopback-only network allowance |
 | Configured saved / running devices | 10 / 1 |
-| Configured VM / Android boot deadlines | 300 seconds / 300 seconds |
+| Configured VM / Android boot deadlines | 600 seconds / 300 seconds after the first OCI cold-boot measurement |
 | Configured broker request deadline | 30 seconds |
 
 The Python 3.12 dependency transaction added six packages without upgrading
@@ -104,8 +104,19 @@ to the VM group or grant it access to room seeds/disks. The installer must creat
 the data root with the VM group before first startup; otherwise a newly created
 root:opc parent would prevent QEMU from traversing it.
 
-The configuration file deliberately sets `MOBILE_VM_BOOT_SECONDS=300`, overriding
-the code's 180-second default. Both guest boot and Android readiness happen in
+The host broker unit sets `RuntimeDirectoryPreserve=yes`. Docker bind-mounts
+`/run/community-mobile` by directory inode, so removing and recreating that
+directory on a broker restart would leave the app attached to the old directory.
+Preserve the directory across service stops/restarts and replace only its socket.
+Keep its existing root:opc 0750 permissions and the socket's 0660 mode. A host
+reboot still recreates `/run`; the broker must create the directory before the
+app container starts or is recreated with its bind mount.
+
+The first OCI VM reached the guest HTTP broker about 4 minutes 16 seconds after
+QEMU startup. The configuration was therefore extended to
+`MOBILE_VM_BOOT_SECONDS=600`, overriding the code's 180-second default; Android
+readiness has a separate 300-second deadline. HTTP availability alone does not
+prove Android is ready. Both guest boot and Android readiness happen in
 the background; the private wake HTTP response is prompt and reports `starting`.
 Status must become `running` only after the room-specific guest reports a real
 Android boot. Keep the data root, launcher's fixed `BASE`, systemd bind paths,
@@ -138,10 +149,20 @@ broker is enabled after its private environment is installed.
 
 The token appears only in CIDATA user-data, cloud-init's private retained
 user-data, and `/etc/customcloudbot-mobile.instance.env` (0600). It is not put in
-`runcmd`, metadata, command arguments, or a shell command. QEMU's serial output is
-disabled and systemd stdout is discarded. Cloud-init debug tooling and support
+`runcmd`, metadata, command arguments, or a shell command. QEMU's serial output
+stays in a bounded 128 KiB in-memory ring buffer; it is not written to a file,
+network port, or journal, and systemd stdout is discarded. Cloud-init debug tooling and support
 archives can include user-data: treat each guest's `/var/lib/cloud` and seed ISO
 as credentials and do not collect them into ordinary diagnostic logs.
+
+For a VM that does not reach its private HTTP broker, the root operator can run
+`python3 /opt/customcloudbot-mobile/vm-bootlog.py <room-uuid>` to read the existing
+private QMP ring buffer. This helper accepts only a room identifier, issues only
+QMP capabilities and the fixed `ringbuf-read` command, has a five-second deadline,
+and returns at most the last 16 KiB of console text. It does not open credentials
+or environment files and redacts token-shaped values before clipping output.
+Reading drains the currently retained buffer, so a second read contains only new
+output. Do not expose this diagnostic helper or the QMP socket through app tools.
 
 ## Firewall and service ordering
 

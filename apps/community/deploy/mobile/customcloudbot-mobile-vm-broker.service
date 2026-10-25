@@ -10,6 +10,8 @@ User=root
 Group=opc
 RuntimeDirectory=community-mobile
 RuntimeDirectoryMode=0750
+# Docker binds the directory inode; replacing it strands the app on the old socket.
+RuntimeDirectoryPreserve=yes
 WorkingDirectory=/opt/customcloudbot-mobile
 EnvironmentFile=/etc/customcloudbot-mobile-vm.env
 ExecStart=/usr/bin/node /opt/customcloudbot-mobile/vm-service.mjs

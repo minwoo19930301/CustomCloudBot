@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {mkdtemp,rm,stat} from 'node:fs/promises';
+import {mkdtemp,rm,stat,readFile,open} from 'node:fs/promises';
 import path from 'node:path';
 import {startVMBroker} from './vm-service.mjs';
 import {vmConfiguration} from './vm-pool.mjs';
@@ -35,4 +35,31 @@ test('host service only starts on an authenticated private socket and closes cle
 
 test('host service rejects TCP-only configuration before provisioning or listening',async()=>{
   await assert.rejects(startVMBroker({config:{socket:null},runtime:{}}),/private Unix socket/);
+});
+
+test('host deployment preserves the socket directory inode and authenticated endpoint across broker restarts',async t=>{
+  const unit=await readFile(new URL('./customcloudbot-mobile-vm-broker.service',import.meta.url),'utf8');
+  assert.match(unit,/^RuntimeDirectoryPreserve=yes$/m,'systemd must not remove a directory already bind-mounted into the app');
+  const directory=await mkdtemp('/tmp/ccb-vm-restart-');
+  const socket=path.join(directory,'socket/mobile.sock');
+  const config=vmConfiguration({MOBILE_BROKER_TOKEN:TOKEN,MOBILE_VM_DATA_DIR:path.join(directory,'data'),MOBILE_LISTEN_SOCKET:socket});
+  const runtime={provision:async()=>{},start:async()=>{},stop:async()=>{},isRunning:async()=>false};
+  let service,handle;
+  t.after(async()=>{if(service)await service.close();if(handle)await handle.close();await rm(directory,{recursive:true,force:true});});
+  service=await startVMBroker({config,runtime,log:()=>{}});
+  handle=await open(path.dirname(socket),'r');
+  const original=await handle.stat();
+  await service.close();service=null;
+  service=await startVMBroker({config,runtime,log:()=>{}});
+  const current=await stat(path.dirname(socket));
+  assert.equal(current.ino,original.ino);
+  assert.equal(current.dev,original.dev);
+  assert.equal(current.mode&0o777,0o750);
+  assert.equal((await stat(socket)).mode&0o777,0o660);
+  const status=token=>new Promise((resolve,reject)=>{
+    const request=http.get({socketPath:socket,path:'/health',headers:{authorization:`Bearer ${token}`}},response=>{response.resume();response.on('end',()=>resolve(response.statusCode));});
+    request.on('error',reject);
+  });
+  assert.equal(await status(TOKEN),200);
+  assert.equal(await status('incorrect'),401);
 });

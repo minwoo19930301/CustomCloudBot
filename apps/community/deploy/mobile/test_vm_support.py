@@ -22,6 +22,7 @@ seed = load('vm-seed')
 launch = load('vm-launch')
 firewall = load('vm-firewall')
 poweroff = load('vm-poweroff')
+bootlog = load('vm-bootlog')
 # Real reserved personal-room ID: hexadecimal shape, non-RFC variant bits.
 ROOM = 'f6f6cd49-10f4-6102-2f64-da6554d8dba8'
 
@@ -90,6 +91,8 @@ class SeedTests(unittest.TestCase):
                 self.assertEqual(args[args.index('-qmp') + 1], 'unix:/run/customcloudbot-mobile-vm/' + ROOM + '/qmp.sock,server=on,wait=off')
                 self.assertEqual(args[args.index('-object') + 1], 'rng-random,filename=/dev/urandom,id=rng0')
                 self.assertIn('virtio-rng-pci,rng=rng0,max-bytes=1024,period=1000', args)
+                self.assertEqual(args[args.index('-chardev') + 1], 'ringbuf,id=bootlog,size=131072')
+                self.assertEqual(args[args.index('-serial') + 1], 'chardev:bootlog')
                 self.assertNotIn('-virtfs', args)
                 self.assertNotIn('-fsdev', args)
                 self.assertNotIn('-enable-kvm', args)
@@ -97,12 +100,49 @@ class SeedTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     launch.launch_args(ROOM, base=root, uid=986)
 
-    def test_unit_blocks_same_uid_proc_escape_and_does_not_record_guest_console(self):
+    def test_unit_blocks_same_uid_proc_escape_and_does_not_persist_guest_console(self):
         unit = Path(__file__).with_name('customcloudbot-mobile-vm@.service').read_text()
         self.assertIn('InaccessiblePaths=/proc\n', unit)
         self.assertIn('StandardOutput=null\n', unit)
         source = Path(__file__).with_name('vm-launch.py').read_text()
-        self.assertIn('"-serial", "none"', source)
+        self.assertIn('ringbuf,id=bootlog,size=131072', source)
+        self.assertNotIn('"-serial", "stdio"', source)
+        self.assertNotIn('"-serial", "file:', source)
+
+    def test_bootlog_reads_only_fixed_bounded_console_and_redacts_before_truncating(self):
+        with tempfile.TemporaryDirectory(prefix='ccb-log-', dir='/tmp') as directory:
+            root = Path(directory)
+            (root / ROOM).mkdir()
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(root / ROOM / 'qmp.sock'))
+            listener.listen(1)
+            commands = []
+            token = 'a' * 64
+            payload = 'prior boot log\n' * 2000 + '\nMOBILE_BROKER_TOKEN=' + token + '\n' + token + '\ncloud-init complete\n'
+            def guest():
+                connection, _ = listener.accept()
+                with connection:
+                    stream = connection.makefile('rb')
+                    connection.sendall(b'{"QMP":{"version":{}}}\r\n')
+                    for result in [{}, payload]:
+                        request = json.loads(stream.readline())
+                        commands.append(request)
+                        connection.sendall((json.dumps({'return': result, 'id': request['id']}) + '\r\n').encode())
+                    stream.close()
+            thread = threading.Thread(target=guest, daemon=True)
+            thread.start()
+            try:
+                text = bootlog.read_bootlog(ROOM, runtime=root, timeout=1)
+                self.assertLessEqual(len(text), 16384)
+                self.assertNotIn(token, text)
+                self.assertNotIn('MOBILE_BROKER_TOKEN', text)
+                self.assertIn('cloud-init complete', text)
+                self.assertEqual(commands[1], {'execute': 'ringbuf-read', 'id': 'bootlog', 'arguments': {'device': 'bootlog', 'size': 131072, 'format': 'utf8'}})
+            finally:
+                thread.join(1)
+                listener.close()
+            with self.assertRaises(ValueError):
+                bootlog.read_bootlog('../../another', runtime=root)
 
     def test_firewall_scope_preserves_host_and_only_allows_metadata_dns(self):
         text = firewall.rules(986, '168.107.91.96')
