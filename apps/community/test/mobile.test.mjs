@@ -188,11 +188,11 @@ test("AI tools inspect readiness, execute a validated action and read bounded un
   assert.deepEqual(f.requests.at(-2).body, { package: "com.android.settings" });
 });
 
-test("AI can observe and control a running Android with an IME warning without repeatedly retrying keyboard setup", async t => {
+for (const warning of ['device_keyboard_timeout', 'device_display_timeout']) test(`AI controls running Android despite ${warning} without repeatedly retrying setup`, async t => {
   const f = await fixture(t);
   f.setHandler((request, response) => {
     if (request.url.endsWith('/observe')) return json(response, observation());
-    json(response, { device: { roomId: ROOM, state: 'running', lastError: 'device_keyboard_timeout' } });
+    json(response, { device: { roomId: ROOM, state: 'running', lastError: warning } });
   });
   await f.hub.startTask(ROOM);
   for (const [name, args] of [['mobile_observe', {}], ['mobile_launch', { package: 'com.android.settings' }], ['mobile_tap', { x: 50, y: 60 }]]) {
@@ -204,7 +204,7 @@ test("AI can observe and control a running Android with an IME warning without r
   assert.equal(f.requests.filter(item => item.url.endsWith('/input')).length, 1);
   assert.equal(f.requests.filter(item => item.url.endsWith('/lease') && item.body.active).length, 4, 'ready-device use still renews the active task lease');
   await f.hub.wake(ROOM);
-  assert.equal(f.requests.filter(item => item.url.endsWith('/wake')).length, 1, 'explicit UI wake still retries keyboard setup');
+  assert.equal(f.requests.filter(item => item.url.endsWith('/wake')).length, 1, 'explicit UI wake still retries the incomplete setup');
   await f.hub.endTask(ROOM);
 });
 
@@ -241,6 +241,27 @@ test("UI wake returns preparing immediately while AI waits for Android before se
     `/devices/${ROOM}`, `/devices/${ROOM}/wake`, `/devices/${ROOM}`, `/devices/${ROOM}`,
     `/devices/${ROOM}/input`, `/devices/${ROOM}/observe`,
   ]);
+});
+
+test("the default AI readiness budget covers host and Android boot phases beyond ten minutes", async t => {
+  let now = 1000, polls = 0;
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t, { readyPollMs: 1 });
+  f.setHandler((request, response) => {
+    if (request.url.endsWith('/observe')) return json(response, observation());
+    if (request.url.endsWith('/wake')) return json(response, { device: { state: 'starting' } });
+    if (request.method === 'GET') {
+      polls++;
+      if (polls === 2) now += 600001;
+      if (polls === 3) now += 600000;
+      return json(response, { device: { state: polls < 3 ? 'starting' : 'running' } });
+    }
+    assert.equal(polls, 3, 'AI input waits for Android readiness after both boot phases');
+    json(response, { ok: true });
+  });
+  await f.hub.execute(ROOM, 'mobile_key', { key: 'HOME' });
+  assert.equal(f.requests.filter(request => request.url.endsWith('/wake')).length, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith('/input')).length, 1);
 });
 
 test("failed or slow Android startup never sends an AI action or treats a VM process as ready", async t => {
@@ -450,6 +471,55 @@ test("a failed task lease releases local ownership and later tasks can recover",
   await f.hub.startTask(ROOM);
   await f.hub.endTask(ROOM);
   assert.equal(f.requests.at(-1).body.active, false);
+});
+
+test("an AI task wakes its saved sleeping phone once before reserving a boot lease", async t => {
+  const f = await fixture(t);
+  let waking = false;
+  f.setHandler((request, response) => {
+    if (request.url.endsWith('/wake')) { waking = true; return json(response, { device: { state: 'starting' } }); }
+    if (request.url.endsWith('/lease') && !waking) return json(response, { error: 'device_sleeping' }, 409);
+    json(response, { device: { state: 'starting' } });
+  });
+  await f.hub.startTask(ROOM);
+  assert.deepEqual(f.requests.map(request => request.url), [`/devices/${ROOM}/lease`, `/devices/${ROOM}/wake`, `/devices/${ROOM}/lease`]);
+  await assert.rejects(f.hub.sleep(ROOM), error => error.code === 'device_busy');
+  await f.hub.endTask(ROOM);
+  assert.equal(f.requests.at(-1).body.active, false);
+});
+
+test("sleeping-phone lease recovery is bounded and failed recovery releases local task ownership", async t => {
+  const f = await fixture(t);
+  let recovered = false;
+  f.setHandler((request, response) => {
+    if (request.url.endsWith('/lease') && !recovered) return json(response, { error: 'device_sleeping' }, 409);
+    json(response, { device: { state: request.url.endsWith('/wake') ? 'starting' : 'sleeping' } });
+  });
+  await assert.rejects(f.hub.startTask(ROOM), error => error.code === 'device_sleeping');
+  assert.equal(f.requests.filter(request => request.url.endsWith('/wake')).length, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith('/lease')).length, 2);
+  await f.hub.sleep(ROOM);
+  recovered = true;
+  await f.hub.startTask(ROOM);await f.hub.endTask(ROOM);
+  assert.equal(f.requests.at(-1).body.active, false, 'a failed recovery cannot leave a refcount that prevents release');
+});
+
+test("a failed wake while reserving a sleeping phone does not retry or leave it busy", async t => {
+  const f = await fixture(t);
+  f.setHandler((request, response) => json(response, { error: request.url.endsWith('/wake') ? 'device_capacity_busy' : 'device_sleeping' }, 409));
+  await assert.rejects(f.hub.startTask(ROOM), error => error.code === 'device_capacity_busy');
+  assert.equal(f.requests.length, 2);
+  f.setHandler((request, response) => json(response, { ok: true }));
+  await f.hub.sleep(ROOM);await f.hub.startTask(ROOM);await f.hub.endTask(ROOM);
+  assert.equal(f.requests.at(-1).body.active, false);
+});
+
+test("sleeping-phone recovery rechecks writability before any wake", async t => {
+  let checks = 0;
+  const f = await fixture(t, { assertWritable: async () => { if (++checks > 1) throw Object.assign(new Error('Frozen'), { code: 'ROOM_READ_ONLY' }); } });
+  f.setHandler((request, response) => json(response, { error: 'device_sleeping' }, 409));
+  await assert.rejects(f.hub.startTask(ROOM), error => error.code === 'ROOM_READ_ONLY');
+  assert.equal(f.requests.length, 1);assert.equal(f.requests[0].url, `/devices/${ROOM}/lease`);
 });
 
 test("broker TLS validates trust and accepts an explicit private CA without disabling verification", async t => {

@@ -100,6 +100,7 @@ const BROKER_ERRORS = {
   vm_boot_timeout: "The mobile VM did not finish starting; retry after checking its runtime",
   device_boot_timeout: "Android did not finish starting; retry after checking its runtime",
   device_keyboard_timeout: "Android is running, but its keyboard is not ready; reconnect the keyboard in the mobile workspace",
+  device_display_timeout: "Android is running, but its display is not ready; turn the screen on again in the mobile workspace",
   vm_start_failed: "The mobile VM could not start; check the private runtime",
   vm_stop_failed: "The previous mobile VM has not stopped yet; try again shortly",
   vm_recovery_required: "The mobile runtime restarted; wake this device again",
@@ -135,7 +136,7 @@ function boundedObservation(value) {
 }
 
 /** The HTTP server authenticates room membership; this adapter never accepts a target room in tool arguments. */
-export function createMobileHub({ getConfig, assertWritable = async () => {}, env = process.env, allowInsecureLoopback = env.NODE_ENV !== "production", allowInternalHttp = env.MOBILE_BROKER_ALLOW_INTERNAL_HTTP === "1", timeoutMs = 15000, operationTimeoutMs = 90000, wakeTimeoutMs = 600000, readyTimeoutMs = 600000, readyPollMs = 1000, leaseIntervalMs = 30000, log = entry => console.warn(JSON.stringify(entry)) } = {}) {
+export function createMobileHub({ getConfig, assertWritable = async () => {}, env = process.env, allowInsecureLoopback = env.NODE_ENV !== "production", allowInternalHttp = env.MOBILE_BROKER_ALLOW_INTERNAL_HTTP === "1", timeoutMs = 15000, operationTimeoutMs = 90000, wakeTimeoutMs = 600000, readyTimeoutMs = 1260000, readyPollMs = 1000, leaseIntervalMs = 30000, log = entry => console.warn(JSON.stringify(entry)) } = {}) {
   const tasks = new Map();
   const queues = new Map();
   const depths = new Map();
@@ -240,7 +241,17 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     let state = tasks.get(key);
     if (!state) { state = { count: 0, timer: null, pending: null }; tasks.set(key, state); }
     state.count++;
-    try { await lease(key, true, state); }
+    try {
+      try { await lease(key, true, state); }
+      catch (error) {
+        if (error.code !== "device_sleeping") throw error;
+        // A saved sleeping phone cannot accept a guest lease yet. Start/join its
+        // asynchronous wake once, then reserve its host-side boot lease.
+        await wakeRaw(roomId, options, false);
+        await writable(roomId, options);
+        await lease(key, true, state);
+      }
+    }
     catch (error) { state.count--; if (!state.count) { clearInterval(state.timer); if (tasks.get(key) === state) tasks.delete(key); } throw error; }
     if (!closing && state.count > 0 && tasks.get(key) === state && !state.timer) {
       state.timer = setInterval(() => {
@@ -262,12 +273,12 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     try { await lease(key, false, state); }
     finally { if (state.count === 0 && tasks.get(key) === state) tasks.delete(key); }
   };
-  const wakeRaw = async (roomId, options = {}) => {
+  const wakeRaw = async (roomId, options = {}, renewLease = true) => {
     await writable(roomId, options);
     const result = await request(route(roomId, "wake"), { method: "POST", body: {}, signal: options.signal, timeout: wakeTimeoutMs });
     await writable(roomId, options);
     const active = tasks.get(roomKey(roomId));
-    if (active?.count && ["running", "starting", "booting"].includes(result.device?.state)) await lease(roomKey(roomId), true, active);
+    if (renewLease && active?.count && ["running", "starting", "booting"].includes(result.device?.state)) await lease(roomKey(roomId), true, active);
     return result;
   };
   const status = (roomId, options = {}) => request(route(roomId), { signal: options.signal });
@@ -276,6 +287,8 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     // explicit wake should retry that setup, not every AI observe/tap/launch.
     let result = await status(roomId, options);
     if (result.device?.state !== "running") result = await wakeRaw(roomId, options);
+    // Cold startup includes both the host VM and the Android framework, each
+    // with a 10-minute budget, plus a margin for the final readiness response.
     const deadline = Date.now() + readyTimeoutMs;
     while (["starting", "booting"].includes(result.device?.state)) {
       await writable(roomId, options);

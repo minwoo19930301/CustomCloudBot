@@ -13,6 +13,10 @@ const B = '22222222-2222-4222-8222-222222222222';
 const C = '33333333-3333-4333-8333-333333333333';
 const TOKEN = 'this-test-token-has-more-than-thirty-two-characters';
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const DISPLAY_COMMANDS = [
+  "'input' 'keyevent' '224'", "'svc' 'power' 'stayon' 'true'",
+  "'settings' 'put' 'system' 'screen_off_timeout' '2147483647'",
+];
 
 async function fixture(t, overrides = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'ccb-mobile-test-'));
@@ -261,7 +265,7 @@ test('configured IME is enabled and selected before Android is reported ready', 
   const { pool, calls } = await fixture(t, { inputIme });
   assert.equal((await pool.wake(A)).device.state, 'running');
   const commands = calls.filter(item => item.file === 'adb' && item.args.includes('shell')).map(item => item.args.at(-1));
-  assert.deepEqual(commands, ["'getprop' 'sys.boot_completed'", `'ime' 'enable' '${inputIme}'`, `'ime' 'set' '${inputIme}'`]);
+  assert.deepEqual(commands, ["'getprop' 'sys.boot_completed'", ...DISPLAY_COMMANDS, `'ime' 'enable' '${inputIme}'`, `'ime' 'set' '${inputIme}'`]);
   assert.deepEqual(calls.filter(item => item.args.at(-1).startsWith("'ime'")).map(item => item.options.timeout), [30_000, 30_000]);
 });
 
@@ -761,4 +765,65 @@ test('ready marker reader uses only the fixed bounded non-symlink root-owned fil
   assert.equal(await readReadyRevision({ openFile }), '');
   assert.equal(closed, 7);
   await assert.rejects(readReadyRevision({ openFile: async () => { throw Object.assign(new Error('symlink refused'), { code: 'ELOOP' }); } }), { code: 'ELOOP' });
+});
+
+test('every wake prepares a visible non-sleeping display with fixed internal power commands', async t => {
+  const { pool, calls } = await fixture(t);
+  await pool.wake(A);
+  let commands = calls.filter(item => item.file === 'adb' && item.args.includes('shell'));
+  assert.deepEqual(commands.map(item => item.args.at(-1)), ["'getprop' 'sys.boot_completed'", ...DISPLAY_COMMANDS]);
+  assert.deepEqual(commands.slice(1).map(item => item.options.timeout), [30_000, 30_000, 30_000]);
+  await assert.rejects(pool.input(A, { type: 'key', key: 'WAKEUP' }), { code: 'invalid_key' });
+  await pool.sleep(A); calls.length = 0;
+  assert.equal((await pool.wake(A)).device.state, 'running');
+  commands = calls.filter(item => item.file === 'adb' && item.args.includes('shell'));
+  assert.deepEqual(commands.map(item => item.args.at(-1)), ["'getprop' 'sys.boot_completed'", ...DISPLAY_COMMANDS]);
+});
+
+test('display preparation retries only its failed fixed step within the shared boot deadline', async t => {
+  const { pool, calls, advance } = await fixture(t, { bootMs: 60_000 });
+  const previous = pool.run;
+  let stays = 0;
+  pool.run = async (file, args, options) => {
+    const result = await previous(file, args, options);
+    if (file === 'adb' && args.at(-1) === DISPLAY_COMMANDS[1] && ++stays === 1) {
+      advance(options.timeout); throw new Error('temporary power-service timeout');
+    }
+    return result;
+  };
+  const status = await pool.wake(A);
+  assert.equal(status.device.state, 'running'); assert.equal(status.device.lastError, undefined);
+  assert.equal(calls.filter(item => item.args.at(-1) === DISPLAY_COMMANDS[0]).length, 1);
+  assert.equal(calls.filter(item => item.args.at(-1) === DISPLAY_COMMANDS[1]).length, 2);
+  assert.equal(calls.filter(item => item.args.at(-1) === DISPLAY_COMMANDS[2]).length, 1);
+  assert.deepEqual(calls.filter(item => item.args.at(-1) === DISPLAY_COMMANDS[1]).map(item => item.options.timeout), [30_000, 29_000]);
+});
+
+test('display setup failure stays a distinct recoverable warning and never shuts down a booted Android', async t => {
+  for (const failedCommand of DISPLAY_COMMANDS) {
+    const { pool, calls, advance, containers } = await fixture(t, { bootMs: 10_000, inputIme: 'com.android.adbkeyboard/.AdbIME' });
+    const previous = pool.run;
+    let fail = true;
+    pool.run = async (file, args, options) => {
+      const result = await previous(file, args, options);
+      if (fail && file === 'adb' && args.at(-1) === failedCommand) {
+        assert.equal(options.timeout, 10_000);
+        advance(options.timeout); throw new Error('private power-command failure');
+      }
+      return result;
+    };
+    const status = await pool.wake(A);
+    assert.equal(status.device.state, 'running');
+    assert.equal(status.device.lastError, 'device_display_timeout');
+    assert.equal(JSON.parse(await readFile(pool.stateFile, 'utf8')).devices[0].lastError, 'device_display_timeout');
+    assert.equal(containers.get(pool.name(pool.devices.get(A))).State.Running, true);
+    assert.equal(calls.some(item => item.file === 'docker' && item.args[0] === 'stop'), false);
+    assert.equal(calls.some(item => item.args.at(-1).startsWith("'ime'")), false);
+    assert.deepEqual(await pool.screenshot(A), png);
+    fail = false;
+    const repaired = await pool.wake(A);
+    assert.equal(repaired.device.state, 'running'); assert.equal(repaired.device.lastError, undefined);
+    assert.equal(calls.filter(item => item.file === 'docker' && item.args[0] === 'create').length, 1);
+    assert.equal(calls.some(item => item.args.at(-1).startsWith("'ime' 'set'")), true);
+  }
 });

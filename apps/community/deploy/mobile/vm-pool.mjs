@@ -9,11 +9,13 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 const fail = (code, message, status = 503) => new MobileError(code, message, status);
 const KEYS = new Set(['BACK', 'HOME', 'APP_SWITCH', 'ENTER', 'DEL', 'TAB', 'ESCAPE', 'DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT']);
+const READY_WARNINGS = new Set(['device_keyboard_timeout', 'device_display_timeout']);
 // Guest responses may contain private command output. Preserve only recognized
 // codes, with locally defined messages and statuses instead of guest text.
 const GUEST_ERRORS = Object.freeze({
   device_boot_timeout:[503, 'Android did not finish starting.'],
   device_keyboard_timeout:[503, 'Android is running, but its input keyboard is not ready.'],
+  device_display_timeout:[503, 'Android is running, but its display is not ready.'],
   device_runtime_unavailable:[503, 'The Android runtime could not be inspected.'],
   device_display_unavailable:[503, 'Android display dimensions are unavailable.'],
   device_screen_unavailable:[503, 'Android did not return a valid screenshot.'],
@@ -317,7 +319,7 @@ export class VMPool {
     const id = roomId(rawId);
     if (!this.starts.has(id) && this.devices.get(id)?.state === 'running') {
       const current = await this.status(id);
-      if (current.device.state === 'running' && current.device.lastError !== 'device_keyboard_timeout') return current;
+      if (current.device.state === 'running' && !READY_WARNINGS.has(current.device.lastError)) return current;
     }
     if (!this.starts.has(id)) {
       if (this.starts.size >= this.config.maxSlots) throw fail('device_busy', 'Too many mobile devices are being prepared.', 429);
@@ -385,7 +387,7 @@ export class VMPool {
         if (result?.device?.roomId !== id || result.device.state !== 'running') throw fail('device_boot_timeout', 'Android did not finish starting.');
         if (this.startingLeases.has(id)) device.leaseExpiresAt = this.startingLeases.get(id);
         device.state = 'running'; device.lastActiveAt = this.now();
-        if (result.device.lastError === 'device_keyboard_timeout') device.lastError = 'device_keyboard_timeout';
+        if (READY_WARNINGS.has(result.device.lastError)) device.lastError = result.device.lastError;
         else delete device.lastError;
         await this.persist();
       } catch (error) {

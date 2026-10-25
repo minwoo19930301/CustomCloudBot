@@ -120,16 +120,17 @@ test('touch sends a tap before synchronously opening the iPhone keyboard; cancel
   assert.equal(f.requests.filter(request=>request.path.endsWith('/input')).length,1);
 });
 
-test('keyboard warnings keep the decoded screen and touch usable, survive frame loads and allow explicit reconnect',async t=>{
-  const statuses=[],f=await fixture(t,{lastError:'device_keyboard_timeout',onStatus:(message,kind)=>statuses.push({message,kind})});
-  const reconnect=buttonBy(f.mount,'키보드 다시 연결');
-  assert.equal(reconnect.textContent,'키보드 다시 연결');assert.equal(reconnect.disabled,false);
-  assert.equal(statuses.at(-1).kind,'warning');assert.match(statuses.at(-1).message,/키보드 연결이 지연/);
+for(const [warning,label,meaning] of [['device_keyboard_timeout','키보드 다시 연결',/키보드 연결이 지연/],['device_display_timeout','화면 다시 켜기',/화면이 아직 켜지지/]])test(`${warning} keeps controls usable and preserves its warning until explicit recovery`,async t=>{
+  const statuses=[],f=await fixture(t,{lastError:warning,onStatus:(message,kind)=>statuses.push({message,kind})});
+  const reconnect=buttonBy(f.mount,label);
+  assert.equal(reconnect.textContent,label);assert.equal(reconnect.disabled,false);
+  assert.equal(statuses.at(-1).kind,'warning');assert.match(statuses.at(-1).message,meaning);
   assert.equal(f.requests.some(request=>request.path.endsWith('/wake')),false,'a warning must not trigger an automatic retry loop');
   f.image.naturalWidth=720;f.image.naturalHeight=1560;f.image.fire('load');
   assert.equal(f.image.hidden,false);assert.equal(find(f.mount,'mobile-screen-message').hidden,true);
   assert.equal(buttonBy(f.mount,'모바일 화면 확대').disabled,false);assert.equal(buttonBy(f.mount,'Android 홈').disabled,false);
-  assert.equal(statuses.at(-1).kind,'warning','a new screenshot cannot hide a persistent keyboard warning');
+  assert.equal(statuses.at(-1).kind,'warning','a new screenshot cannot hide a persistent setup warning');
+  assert.match(statuses.at(-1).message,meaning);
   f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
   buttonBy(f.mount,'Android 홈').onclick();await flush();
   assert.equal(f.requests.filter(request=>request.path.endsWith('/input')).length,2);
@@ -139,9 +140,9 @@ test('keyboard warnings keep the decoded screen and touch usable, survive frame 
   assert.equal(f.image.hidden,false);assert.deepEqual(statuses.at(-1),{message:'Android 연결됨',kind:'ready'});
 });
 
-test('readonly keyboard warnings retain the screen but cannot reconnect or control the device',async t=>{
-  const f=await fixture(t,{readOnly:true,lastError:'device_keyboard_timeout'});
-  const reconnect=buttonBy(f.mount,'키보드 다시 연결');assert.equal(reconnect.disabled,true);
+for(const [warning,label] of [['device_keyboard_timeout','키보드 다시 연결'],['device_display_timeout','화면 다시 켜기']])test(`readonly ${warning} cannot reconnect or control the device`,async t=>{
+  const f=await fixture(t,{readOnly:true,lastError:warning});
+  const reconnect=buttonBy(f.mount,label);assert.equal(reconnect.disabled,true);
   f.image.naturalWidth=720;f.image.naturalHeight=1560;f.image.fire('load');assert.equal(f.image.hidden,false);
   reconnect.onclick();buttonBy(f.mount,'Android 홈').onclick();await flush();
   assert.ok(f.requests.every(request=>!request.path.endsWith('/wake')&&!request.path.endsWith('/input')));

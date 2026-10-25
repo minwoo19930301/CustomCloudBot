@@ -334,6 +334,28 @@ test('a booted guest keyboard warning keeps the VM usable and an explicit wake r
   assert.equal(f.calls.some(call => call.name === 'stop'), false);
 });
 
+test('a booted guest display warning stays running and explicit wake retries until the display is ready', async t => {
+  let warning = true;
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/wake')) return {device:{roomId:spec.roomId, state:'running', ...(warning ? {lastError:'device_display_timeout'} : {})}};
+  }});
+  const first = await ready(f.pool, A);
+  assert.equal(first.device.lastError, 'device_display_timeout');
+  assert.equal(first.capacity.running, 1);
+  assert.equal(JSON.parse(await readFile(path.join(f.directory, 'vm-pool.json'), 'utf8')).devices[0].lastError, 'device_display_timeout');
+  assert.deepEqual(await f.pool.screenshot(A), PNG);
+  await f.pool.input(A, {type:'key', key:'HOME'});
+  assert.equal((await ready(f.pool, A)).device.lastError, 'device_display_timeout');
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 2);
+  warning = false;
+  assert.equal((await ready(f.pool, A)).device.lastError, undefined);
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 3);
+  await f.pool.wake(A);
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 3);
+  assert.equal(f.calls.filter(call => call.name === 'start').length, 1);
+  assert.equal(f.calls.some(call => call.name === 'stop'), false);
+});
+
 test('guest wake transport allows Docker and response overhead beyond the unchanged boot limit', async t => {
   const f = await fixture(t, {config:{wakeMs:600_000}, request:async (spec, request) => {
     if (request.path.endsWith('/wake')) {
@@ -428,7 +450,7 @@ test('restart recovery health wait is at most thirty seconds and never extends t
   });
 });
 
-test('guest wake only copies the recognized keyboard warning into public and persisted status', async t => {
+test('guest wake only copies recognized readiness warnings into public and persisted status', async t => {
   const f = await fixture(t, {request:async (spec, request) => {
     if (request.path.endsWith('/wake')) return {device:{roomId:spec.roomId, state:'running', lastError:spec.token}};
   }});
@@ -585,7 +607,7 @@ test('private guest transport fixes host, authorization and room routes, and bou
   assert.equal(seen.length,1);
   handler=(request,response)=>{response.writeHead(302,{location:'http://example.com/secret'});response.end(spec.token);};
   await assert.rejects(requestGuest(spec,{path:'/health'}),error=>error.code==='guest_operation_failed'&&!error.message.includes(spec.token));
-  for (const [code, status] of [['device_starting',409], ['device_screen_unavailable',503], ['device_operation_failed',503], ['device_operation_timeout',504], ['device_operation_cancelled',409], ['invalid_coordinates',400]]) {
+  for (const [code, status] of [['device_starting',409], ['device_screen_unavailable',503], ['device_display_timeout',503], ['device_operation_failed',503], ['device_operation_timeout',504], ['device_operation_cancelled',409], ['invalid_coordinates',400]]) {
     handler=(request,response)=>{response.writeHead(503,{'content-type':'application/json'});response.end(JSON.stringify({error:code,message:spec.token,stderr:spec.token}));};
     await assert.rejects(requestGuest(spec,{path:`/devices/${A}/screenshot`,binary:true}), error => error.code === code && error.status === status && !error.message.includes(spec.token));
   }

@@ -291,10 +291,18 @@ export class DevicePool {
 
   async ready(device) {
     const end = this.now() + this.config.bootMs;
-    let attempts = 0, androidReady = false, imeEnabled = false;
-    const failure = () => androidReady
-      ? new MobileError('device_keyboard_timeout', 'Android is running, but its input keyboard is not ready. Try waking the device again to retry keyboard setup.', 503)
-      : new MobileError('device_boot_timeout', 'Android did not finish starting. Try waking the device again.', 503);
+    let attempts = 0, androidReady = false, displayStep = 0, imeEnabled = false;
+    // Power controls are fixed startup operations, never caller-supplied keys.
+    const displayCommands = [
+      ['input', 'keyevent', '224'],
+      ['svc', 'power', 'stayon', 'true'],
+      ['settings', 'put', 'system', 'screen_off_timeout', '2147483647'],
+    ];
+    const failure = () => !androidReady
+      ? new MobileError('device_boot_timeout', 'Android did not finish starting. Try waking the device again.', 503)
+      : displayStep < displayCommands.length
+        ? new MobileError('device_display_timeout', 'Android is running, but its display wake settings are not ready. Try waking the device again to retry display setup.', 503)
+        : new MobileError('device_keyboard_timeout', 'Android is running, but its input keyboard is not ready. Try waking the device again to retry keyboard setup.', 503);
     const timeout = maximum => {
       const remaining = end - this.now();
       if (remaining <= 0) throw failure();
@@ -306,6 +314,10 @@ export class DevicePool {
         const boot = await this.shell(device, ['getprop', 'sys.boot_completed'], { timeout: timeout(5000) });
         if (String(boot).trim() === '1') {
           androidReady = true;
+          while (displayStep < displayCommands.length) {
+            await this.shell(device, displayCommands[displayStep], { timeout: timeout(30_000) });
+            displayStep++;
+          }
           if (this.config.inputIme) {
             if (!imeEnabled) {
               await this.shell(device, ['ime', 'enable', this.config.inputIme], { timeout: timeout(30_000) });
@@ -315,7 +327,7 @@ export class DevicePool {
           }
           return;
         }
-      } catch { /* Android's ADB transport appears before its framework and keyboard are ready. */ }
+      } catch { /* ADB appears before the framework, display and keyboard services are ready. */ }
       const remaining = end - this.now();
       if (remaining > 0) await this.pause(Math.min(1000, remaining));
     }
@@ -353,15 +365,15 @@ export class DevicePool {
         device.state = 'running'; device.lastActiveAt = this.now(); device.lastError = undefined;
         await this.persist();
       } catch (error) {
-        if (error.code === 'device_keyboard_timeout') {
-          // A slow IME must not shut down an Android device that can already display and accept touch.
+        if (['device_display_timeout', 'device_keyboard_timeout'].includes(error.code)) {
+          // Keep an already booted Android available for diagnostics and an explicit setup retry.
           device.state = 'running'; device.lastActiveAt = this.now(); device.lastError = error.code;
         } else {
           try { await this.run('docker', ['stop', '--time', '10', this.name(device)], { timeout: 20_000 }); } catch { /* Keep an error state and retry reconciliation on the next request. */ }
           device.state = 'error'; device.lastError = 'device_boot_timeout'; device.leaseExpiresAt = 0;
         }
         await this.persist();
-        if (error.code !== 'device_keyboard_timeout') throw error;
+        if (!['device_display_timeout', 'device_keyboard_timeout'].includes(error.code)) throw error;
       }
       return this.status(id);
     });
