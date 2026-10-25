@@ -33,7 +33,8 @@ async function fixture(t, overrides = {}) {
         const labels = Object.fromEntries(args.flatMap((value, index) => value === '--label' ? [args[index + 1].split('=')] : []));
         assert.equal(containers.has(name), false);
         const [hostIp, hostPort] = args[args.indexOf('--publish') + 1].split(':');
-        containers.set(name, { Config: { Labels: labels }, HostConfig: { PortBindings: { '5555/tcp': [{ HostIp: hostIp, HostPort: hostPort }] } }, State: { Running: false } });
+        const network = args.includes('--network') ? args[args.indexOf('--network') + 1] : 'bridge';
+        containers.set(name, { Config: { Labels: labels }, HostConfig: { NetworkMode: network, PortBindings: { '5555/tcp': [{ HostIp: hostIp, HostPort: hostPort }] } }, NetworkSettings: { Networks: { [network]: {} } }, State: { Running: false } });
         return name;
       }
       if (operation === 'start') { containers.get(args[1]).State.Running = true; return args[1]; }
@@ -60,6 +61,15 @@ test('configuration requires explicit private authentication and operator image'
   assert.throws(() => configuration({ MOBILE_ANDROID_IMAGE: 'image', MOBILE_BROKER_TOKEN: TOKEN, MOBILE_DOCKER_DEVICES_JSON: '["/etc/passwd"]' }), /device mapping/);
 });
 
+test('optional Docker network accepts a dedicated name and rejects modes or unsafe syntax', () => {
+  const env = { MOBILE_ANDROID_IMAGE: 'image', MOBILE_BROKER_TOKEN: TOKEN };
+  assert.equal(configuration(env).network, '');
+  assert.equal(configuration({ ...env, MOBILE_DOCKER_NETWORK: 'community-mobile_1' }).network, 'community-mobile_1');
+  for (const network of ['bridge', 'host', 'none', 'default', 'container:other', '--privileged', 'mobile network', 'mobile\nnetwork', 'network,alias=other', 'a'.repeat(129)]) {
+    assert.throws(() => configuration({ ...env, MOBILE_DOCKER_NETWORK: network }), /MOBILE_DOCKER_NETWORK/);
+  }
+});
+
 test('status and leases never allocate a device for ordinary chats', async t => {
   const { pool, calls } = await fixture(t);
   assert.equal((await pool.status(A)).device.state, 'unallocated');
@@ -81,10 +91,24 @@ test('each room receives persistent isolated data and only loopback ADB', async 
   assert.ok(creates[0].args.includes('127.0.0.1:16555:5555'));
   assert.ok(creates[1].args.includes('127.0.0.1:16556:5555'));
   assert.equal(creates.some(item => item.args.includes('--privileged')), false);
+  assert.equal(creates.some(item => item.args.includes('--network')), false);
   await pool.sleep(A);
   await pool.wake(A);
   assert.equal(calls.filter(item => item.args[0] === 'create').length, 2);
   assert.equal(calls.some(item => ['rm', 'volume'].includes(item.args[0])), false);
+});
+
+test('dedicated network is retained across sleep, wake and broker restart', async t => {
+  const { pool, config, calls, containers } = await fixture(t, { network: 'community-mobile' });
+  await pool.wake(A);
+  const create = calls.find(item => item.args[0] === 'create');
+  assert.equal(create.args[create.args.indexOf('--network') + 1], 'community-mobile');
+  await pool.sleep(A);
+  const restored = new DevicePool(config, { run: pool.run, now: pool.now, pause: pool.pause });
+  await restored.initialize();
+  await restored.wake(A);
+  assert.equal(containers.get(pool.name(pool.devices.get(A))).State.Running, true);
+  assert.equal(calls.filter(item => item.args[0] === 'create').length, 1);
 });
 
 test('concurrent wake requests respect global running and persistent slot caps', async t => {
@@ -101,7 +125,7 @@ test('concurrent wake requests respect global running and persistent slot caps',
 });
 
 test('unmanaged legacy container counts toward running capacity but is never adopted', async t => {
-  const { pool, containers, calls } = await fixture(t, { maxRunning: 1, externalContainers: ['legacy-redroid'] });
+  const { pool, containers, calls } = await fixture(t, { maxRunning: 1, network: 'community-mobile', externalContainers: ['legacy-redroid'] });
   containers.set('legacy-redroid', { Config: { Labels: {} }, State: { Running: true } });
   await assert.rejects(pool.wake(A), { code: 'device_capacity_busy' });
   assert.equal(pool.devices.size, 0);
@@ -153,6 +177,33 @@ test('changing the configured ADB port cannot silently operate another room devi
   await assert.rejects(changed.initialize(), { code: 'device_configuration_conflict' });
 });
 
+test('configuring a different network fails without migrating or deleting existing devices', async t => {
+  const { pool, config, calls, containers } = await fixture(t);
+  await pool.wake(A);
+  const stored = await readFile(pool.stateFile, 'utf8');
+  const previousCalls = calls.length;
+  const changed = new DevicePool({ ...config, network: 'community-mobile' }, { run: pool.run, now: pool.now });
+  await assert.rejects(changed.initialize(), { code: 'device_configuration_conflict' });
+  assert.equal(await readFile(pool.stateFile, 'utf8'), stored);
+  assert.equal(containers.get(pool.name(pool.devices.get(A))).State.Running, true);
+  assert.ok(calls.slice(previousCalls).every(item => item.file === 'docker' && item.args[0] === 'inspect'));
+});
+
+test('additional or replaced network attachments block managed device operations', async t => {
+  const { pool, containers, calls } = await fixture(t, { network: 'community-mobile' });
+  await pool.wake(A);
+  const info = containers.get(pool.name(pool.devices.get(A)));
+  const previousCalls = calls.length;
+  info.NetworkSettings.Networks.bridge = {};
+  await assert.rejects(pool.input(A, { type: 'tap', x: 0, y: 0 }), { code: 'device_configuration_conflict' });
+  info.NetworkSettings.Networks = { bridge: {} };
+  await assert.rejects(pool.sleep(A), { code: 'device_configuration_conflict' });
+  info.NetworkSettings.Networks = { 'community-mobile': {} };
+  info.HostConfig.NetworkMode = 'bridge';
+  await assert.rejects(pool.wake(A), { code: 'device_configuration_conflict' });
+  assert.ok(calls.slice(previousCalls).every(item => item.file === 'docker' && item.args[0] === 'inspect'));
+});
+
 test('Android rotation changes the coordinate bounds used by touch and observations', async t => {
   const { pool } = await fixture(t);
   await pool.wake(A);
@@ -179,7 +230,59 @@ test('inputs validate real dimensions and never allow host shell or arbitrary An
   assert.equal(calls.some(item => ['sh', 'bash'].includes(item.file)), false);
 });
 
-test('Unicode is explicit: no silent corruption and configured IME uses base64', async t => {
+test('configured IME is enabled and selected before Android is reported ready', async t => {
+  const inputIme = 'com.android.adbkeyboard/.AdbIME';
+  const { pool, calls } = await fixture(t, { inputIme });
+  assert.equal((await pool.wake(A)).device.state, 'running');
+  const commands = calls.filter(item => item.file === 'adb' && item.args.includes('shell')).map(item => item.args.at(-1));
+  assert.deepEqual(commands, ["'getprop' 'sys.boot_completed'", `'ime' 'enable' '${inputIme}'`, `'ime' 'set' '${inputIme}'`]);
+});
+
+test('headless app launch resolves and starts only the requested package activity', async t => {
+  const { pool, calls } = await fixture(t);
+  await pool.wake(A);
+  const previous = pool.run;
+  let component;
+  pool.run = async (file, args, options) => {
+    const output = await previous(file, args, options);
+    return file === 'adb' && args.at(-1).startsWith("'cmd' 'package' 'resolve-activity'") ? `priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\n${component}\n` : output;
+  };
+  for (component of ['com.android.settings/.Settings', 'com.android.settings/com.android.settings.Settings', 'com.android.settings/.Settings$MainActivity']) {
+    assert.deepEqual(await pool.launch(A, 'com.android.settings'), { ok: true });
+    assert.equal(calls.at(-2).args.at(-1), "'cmd' 'package' 'resolve-activity' '--brief' '--user' '0' '-a' 'android.intent.action.MAIN' '-c' 'android.intent.category.LAUNCHER' 'com.android.settings'");
+    assert.equal(calls.at(-1).args.at(-1), `'am' 'start' '--user' '0' '-W' '-n' '${component}'`);
+  }
+  assert.equal(calls.some(item => item.args.at(-1).startsWith("'monkey'")), false);
+});
+
+test('missing, malformed or cross-package launcher results never start an activity', async t => {
+  const { pool, calls } = await fixture(t);
+  await pool.wake(A);
+  const previous = pool.run;
+  let resolved;
+  pool.run = async (file, args, options) => {
+    const output = await previous(file, args, options);
+    return file === 'adb' && args.at(-1).startsWith("'cmd' 'package' 'resolve-activity'") ? resolved : output;
+  };
+  for (resolved of ['', 'No activity found\n', 'com.android.settings/', 'com.android.settings/.Settings/extra', 'com.android.settings/.Settings;reboot', 'com.android.settings/.Settings --user 10', 'com.other.app/.MainActivity', 'com.android.settings/.Settings\nError: invalid activity']) {
+    await assert.rejects(pool.launch(A, 'com.android.settings'), { code: 'app_not_launchable', status: 404 });
+  }
+  assert.equal(calls.some(item => item.file === 'adb' && item.args.at(-1).startsWith("'am' 'start'")), false);
+});
+
+test('IME selection failure does not report a device ready for text', async t => {
+  const { pool, calls } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME', bootMs: 1000 });
+  const previous = pool.run;
+  pool.run = async (file, args, options) => {
+    if (file === 'adb' && args.at(-1).startsWith("'ime' 'set'")) throw new Error('IME unavailable');
+    return previous(file, args, options);
+  };
+  await assert.rejects(pool.wake(A), { code: 'device_boot_timeout' });
+  assert.equal(pool.devices.get(A).state, 'error');
+  assert.ok(calls.some(item => item.file === 'docker' && item.args[0] === 'stop'));
+});
+
+test('Unicode is explicit and base64 input targets only the configured IME for user zero', async t => {
   const first = await fixture(t);
   await first.pool.wake(A);
   await assert.rejects(first.pool.input(A, { type: 'text', text: '안녕하세요' }), { code: 'text_not_supported' });
@@ -187,8 +290,7 @@ test('Unicode is explicit: no silent corruption and configured IME uses base64',
   const second = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME' });
   await second.pool.wake(A);
   await second.pool.input(A, { type: 'text', text: '안녕하세요' });
-  assert.match(second.calls.at(-1).args.at(-1), /'ADB_INPUT_B64'/);
-  assert.ok(second.calls.at(-1).args.at(-1).includes(Buffer.from('안녕하세요').toString('base64')));
+  assert.equal(second.calls.at(-1).args.at(-1), `'am' 'broadcast' '--user' '0' '-a' 'ADB_INPUT_B64' '-p' 'com.android.adbkeyboard' '--es' 'msg' '${Buffer.from('안녕하세요').toString('base64')}'`);
 });
 
 test('screenshots are PNG and UI observes editable bounds with password redaction', async t => {
@@ -213,6 +315,15 @@ test('large Unicode UI trees remain bounded for the app gateway', () => {
   const tree = parseUiTree(node.repeat(500), 720, 1280);
   assert.ok(tree.nodes.length > 0);
   assert.ok(Buffer.byteLength(JSON.stringify(tree)) < 240 * 1024);
+});
+
+test('focused autocomplete inputs are editable while their SearchView container is not', () => {
+  const parsed = parseUiTree('<node text="Search…" class="android.widget.AutoCompleteTextView" enabled="true" focused="true" bounds="[0,0][300,50]"/><node text="Recipients" class="android.widget.MultiAutoCompleteTextView" enabled="true" focused="true" bounds="[0,50][300,100]"/><node class="android.widget.SearchView" enabled="true" focused="true" bounds="[0,0][320,60]"/>', 720, 1280);
+  assert.deepEqual(parsed.nodes.map(({ className, editable, enabled, focused }) => ({ className, editable, enabled, focused })), [
+    { className: 'android.widget.AutoCompleteTextView', editable: true, enabled: true, focused: true },
+    { className: 'android.widget.MultiAutoCompleteTextView', editable: true, enabled: true, focused: true },
+    { className: 'android.widget.SearchView', editable: false, enabled: true, focused: true },
+  ]);
 });
 
 test('HTTP requires bearer on every route, rejects unsafe bodies, and returns typed errors', async t => {

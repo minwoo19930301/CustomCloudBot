@@ -49,11 +49,44 @@ them from the specific verified image and host. Each device's ADB port is bound
 only to `127.0.0.1`, starting at `MOBILE_ADB_BASE_PORT`. The Android containers have
 `restart=no`: a host reboot preserves their disks without booting all ten devices.
 
+For network isolation, create a dedicated Docker bridge and its scoped egress
+firewall before setting `MOBILE_DOCKER_NETWORK` to that network's name. Block
+Android access to host/private networks and cloud metadata while allowing the
+required public traffic and established ADB replies. The broker does not create
+networks or install firewall rules. The name must contain only letters, digits,
+underscores, dots or hyphens, start with a letter or digit, and be at most 128
+characters; built-in modes (`bridge`, `host`, `none`, `default`) are rejected.
+An empty value preserves the existing default-network behavior.
+
+The selected network applies to newly created room containers. Existing managed
+containers must already have that network as their creation network and sole
+network attachment; a mismatch stops broker startup or the device operation with
+`device_configuration_conflict`. No container is moved, recreated or deleted to
+resolve it. Plan any existing device migration separately while preserving its
+data. `MOBILE_EXTERNAL_CONTAINERS` remain exempt from this check and retain their
+original networks and ownership.
+
 The current text fallback uses Android `input text` and therefore accepts printable
 ASCII. For Korean and other Unicode input, bake a trusted ADB keyboard supporting
 `ADB_INPUT_B64` into the approved image and set `MOBILE_INPUT_IME`. The broker reports
 unsupported text explicitly instead of dropping characters. It does not download
 or install an input method automatically.
+
+When another Android service already owns the default ADB server, preserve it.
+Run a separate supervised ADB daemon on an unused loopback port and set
+`ADB_SERVER_SOCKET=tcp:127.0.0.1:<port>` for this broker. An explicit server socket
+does not auto-start the daemon. With ADB versions that reject a hostname in their
+listener argument, use `adb -L tcp:<port> nodaemon server` without `-a` and verify
+that the listener is loopback-only before enabling the broker.
+
+An existing remote host can also be connected using an authenticated SSH tunnel:
+forward a private Unix socket beside the application to the remote broker's
+loopback TCP listener. Keep the bearer token in server-only configuration, pin
+the SSH host key, and restrict the dedicated SSH account/key to that one
+`PermitOpen` destination, without shell access. This opens no public broker or ADB
+port. If the application bind-mounts the local socket directory, preserve that
+directory across tunnel restarts (`RuntimeDirectoryPreserve=yes`) and recreate it
+before the application starts after a host reboot; replace only the socket inode.
 
 ## HTTP contract
 

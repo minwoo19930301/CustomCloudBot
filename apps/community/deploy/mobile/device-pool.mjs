@@ -41,6 +41,8 @@ export function configuration(env = process.env) {
   if (!path.isAbsolute(dataDir)) throw new Error('MOBILE_DATA_DIR must be absolute');
   const devices = jsonList(env, 'MOBILE_DOCKER_DEVICES_JSON');
   if (devices.some(value => !/^\/dev\/[a-zA-Z0-9_./-]+(?::\/dev\/[a-zA-Z0-9_./-]+)?(?::[rwm]{1,3})?$/.test(value))) throw new Error('Invalid Docker device mapping');
+  const network = env.MOBILE_DOCKER_NETWORK || '';
+  if (network && (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(network) || ['bridge', 'host', 'none', 'default'].includes(network))) throw new Error('MOBILE_DOCKER_NETWORK must name a dedicated Docker network');
   const externalContainers = (env.MOBILE_EXTERNAL_CONTAINERS || '').split(',').map(value => value.trim()).filter(Boolean);
   if (externalContainers.some(value => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(value))) throw new Error('Invalid external container name');
   const inputIme = env.MOBILE_INPUT_IME || '';
@@ -48,7 +50,7 @@ export function configuration(env = process.env) {
   const socket = env.MOBILE_LISTEN_SOCKET || '';
   if (socket && (!path.isAbsolute(socket) || Buffer.byteLength(socket) > 100 || /[\x00-\x1f]/.test(socket))) throw new Error('MOBILE_LISTEN_SOCKET must be a short absolute Unix socket path');
   return {
-    token, image, dataDir, devices, externalContainers, inputIme, socket,
+    token, image, dataDir, devices, network, externalContainers, inputIme, socket,
     host: env.MOBILE_LISTEN_HOST || '127.0.0.1',
     port: envInt(env, 'MOBILE_LISTEN_PORT', 8091, 1024, 65535),
     maxSlots: envInt(env, 'MOBILE_MAX_SLOTS', 10, 1, 100),
@@ -90,7 +92,7 @@ export function parseUiTree(xml, width, height) {
       text: fields.password === 'true' ? '' : (fields.text || '').slice(0, 512), description: fields.password === 'true' ? '' : (fields['content-desc'] || '').slice(0, 512),
       resourceId: (fields['resource-id'] || '').slice(0, 256), className: (fields.class || '').slice(0, 128),
       bounds: { left: Math.max(0, left), top: Math.max(0, top), right: Math.min(width, right), bottom: Math.min(height, bottom) },
-      clickable: fields.clickable === 'true', editable: /EditText/.test(fields.class || '') || fields.editable === 'true',
+      clickable: fields.clickable === 'true', editable: /(?:EditText|(?:Multi)?AutoCompleteTextView)$/.test(fields.class || '') || fields.editable === 'true',
       enabled: fields.enabled !== 'false', focused: fields.focused === 'true',
     };
     encodedBytes += Buffer.byteLength(JSON.stringify(node)) + 1;
@@ -169,6 +171,10 @@ export class DevicePool {
       const expectedPort = String(this.config.adbBasePort + this.devices.get(expectedRoom).slot);
       const bindings = data.HostConfig?.PortBindings?.['5555/tcp'] || [];
       if (bindings.length !== 1 || bindings[0].HostIp !== '127.0.0.1' || bindings[0].HostPort !== expectedPort) throw new MobileError('device_configuration_conflict', 'The existing Android transport does not match its private device slot.', 409);
+      if (this.config.network) {
+        const networks = Object.keys(data.NetworkSettings?.Networks || {});
+        if (data.HostConfig?.NetworkMode !== this.config.network || networks.length !== 1 || networks[0] !== this.config.network) throw new MobileError('device_configuration_conflict', 'The existing Android network does not match the configured private network.', 409);
+      }
     }
     return data;
   }
@@ -226,7 +232,10 @@ export class DevicePool {
         await this.connect(device);
         const boot = await this.shell(device, ['getprop', 'sys.boot_completed'], { timeout: 5000 });
         if (String(boot).trim() === '1') {
-          if (this.config.inputIme) await this.shell(device, ['ime', 'enable', this.config.inputIme], { timeout: 5000 });
+          if (this.config.inputIme) {
+            await this.shell(device, ['ime', 'enable', this.config.inputIme], { timeout: 5000 });
+            await this.shell(device, ['ime', 'set', this.config.inputIme], { timeout: 5000 });
+          }
           return;
         }
       } catch { /* Android's ADB transport appears before its framework is ready. */ }
@@ -251,6 +260,7 @@ export class DevicePool {
         if ((await lstat(dataPath)).isSymbolicLink()) throw new Error('Mobile room directory must not be a symlink');
         if (!info) {
           const args = ['create', '--name', this.name(device), '--label', `${OWNER_LABEL}=1`, '--label', `org.customcloudbot.room=${id}`, '--restart', 'no', '--memory', `${this.config.memoryMb}m`, '--cpus', String(this.config.cpus), '--shm-size', '256m', '--publish', `${this.serial(device)}:5555`, '--mount', `type=bind,src=${dataPath},dst=/data`];
+          if (this.config.network) args.push('--network', this.config.network);
           if (this.config.privileged) args.push('--privileged');
           for (const mapping of this.config.devices) args.push('--device', mapping);
           args.push(this.config.image, ...this.config.androidArgs);
@@ -379,7 +389,7 @@ export class DevicePool {
         if (typeof input.text !== 'string' || input.text.length < 1 || input.text.length > 2000 || /[\x00-\x1f\x7f-\x9f]/.test(input.text)) throw new MobileError('invalid_text', 'Text must contain 1–2000 characters without control characters.');
         if (this.config.inputIme) {
           await this.shell(device, ['ime', 'set', this.config.inputIme], { timeout: 5000 });
-          args = ['am', 'broadcast', '-a', 'ADB_INPUT_B64', '--es', 'msg', Buffer.from(input.text, 'utf8').toString('base64')];
+          args = ['am', 'broadcast', '--user', '0', '-a', 'ADB_INPUT_B64', '-p', this.config.inputIme.split('/')[0], '--es', 'msg', Buffer.from(input.text, 'utf8').toString('base64')];
         } else {
           if (/[^\x20-\x7e]/.test(input.text) || input.text.includes('%s')) throw new MobileError('text_not_supported', 'Unicode input requires the configured Android input keyboard.', 422);
           args = ['input', 'text', input.text.replaceAll(' ', '%s')];
@@ -396,7 +406,11 @@ export class DevicePool {
     return this.lock(id, async () => {
       const device = await this.activeDevice(id);
       await this.connect(device);
-      await this.shell(device, ['monkey', '-p', packageName, '-c', 'android.intent.category.LAUNCHER', '1'], { timeout: 8000 });
+      const resolved = await this.shell(device, ['cmd', 'package', 'resolve-activity', '--brief', '--user', '0', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', packageName], { timeout: 8000, maxBuffer: 64 * 1024 });
+      const component = String(resolved).trim().split(/\r?\n/).at(-1) || '';
+      const [resolvedPackage, activity, ...extra] = component.split('/');
+      if (component.length > 512 || resolvedPackage !== packageName || extra.length || !/^\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(activity || '')) throw new MobileError('app_not_launchable', 'This Android app has no valid launcher activity.', 404);
+      await this.shell(device, ['am', 'start', '--user', '0', '-W', '-n', component], { timeout: 8000 });
       return { ok: true };
     });
   }
