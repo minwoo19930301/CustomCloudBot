@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {VMPool, vmConfiguration, guestToken, requestGuest} from './vm-pool.mjs';
 import {BROKER_RUNTIME_REVISION, createServer} from './service.mjs';
+import {MobileError} from './device-pool.mjs';
 
 const A = '12345678-1234-4234-8234-123456789abc';
 const B = '87654321-4321-4321-8321-cba987654321';
@@ -218,6 +219,85 @@ test('guest wake transport allows Docker and response overhead beyond the unchan
   assert.equal(f.calls.some(call => call.name === 'stop'), false);
   await f.pool.input(A, {type:'key', key:'HOME'});
   assert.equal(f.requests.find(request => request.path.endsWith('/input')).timeoutMs, f.config.requestMs);
+});
+
+test('one interrupted guest wake survives broker restart and waits for matching health without restarting the VM', async t => {
+  for (const code of ['guest_connection_failed', 'guest_request_cancelled']) await t.test(code, async t => {
+    let wakes = 0, recoveryHealth = 0;
+    const f = await fixture(t, {config:{wakeMs:600_000}, request:async (spec, request) => {
+      if (request.path.endsWith('/wake')) {
+        wakes++;
+        if (wakes === 1) {f.advance(100_000); throw new MobileError(code, 'Disconnected', 503);}
+        assert.equal(recoveryHealth, 3);
+        assert.equal(request.timeoutMs, 528_000);
+      }
+      if (request.path === '/health' && wakes) {
+        recoveryHealth++;
+        if (recoveryHealth === 1) throw new MobileError('guest_connection_failed', 'Restarting', 503);
+        if (recoveryHealth === 2) return {ok:true, runtimeRevision:'000000000000'};
+      }
+    }});
+    await ready(f.pool, A);
+    assert.equal(wakes, 2);
+    assert.equal(f.calls.filter(call => call.name === 'start').length, 1);
+    assert.equal(f.calls.some(call => call.name === 'stop'), false);
+    assert.ok(f.running.has(A));
+  });
+});
+
+test('guest wake connection recovery is attempted only once', async t => {
+  let wakes = 0;
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/wake')) {wakes++; throw new MobileError('guest_connection_failed', 'Disconnected', 503);}
+  }});
+  await f.pool.wake(A); await f.pool.starts.get(A);
+  assert.equal(wakes, 2);
+  assert.equal((await f.pool.status(A)).device.lastError, 'guest_connection_failed');
+  assert.equal(f.running.size, 0);
+});
+
+test('Android failures, HTTP operation failures and expired requests are never retried as restarts', async t => {
+  for (const code of ['device_boot_timeout', 'guest_operation_failed', 'guest_request_timeout']) await t.test(code, async t => {
+    let wakes = 0;
+    const f = await fixture(t, {request:async (spec, request) => {
+      if (request.path.endsWith('/wake')) {wakes++; throw new MobileError(code, 'Failed', 503);}
+    }});
+    await f.pool.wake(A); await f.pool.starts.get(A);
+    assert.equal(wakes, 1);
+    assert.equal((await f.pool.status(A)).device.lastError, code);
+  });
+});
+
+test('guest wake recovery never retries a VM that has exited', async t => {
+  let wakes = 0;
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/wake')) {
+      wakes++; f.running.delete(A);
+      throw new MobileError('guest_connection_failed', 'Disconnected', 503);
+    }
+  }});
+  await f.pool.wake(A); await f.pool.starts.get(A);
+  assert.equal(wakes, 1);
+  assert.equal((await f.pool.status(A)).device.lastError, 'vm_start_failed');
+  assert.equal(f.requests.filter(request => request.path === '/health').length, 1);
+});
+
+test('restart recovery health wait is at most thirty seconds and never extends the original wake deadline', async t => {
+  for (const firstElapsed of [100_000, 629_000]) await t.test(String(firstElapsed), async t => {
+    let wakes = 0;
+    const f = await fixture(t, {config:{wakeMs:600_000}, request:async (spec, request) => {
+      if (request.path.endsWith('/wake')) {
+        wakes++; f.advance(firstElapsed);
+        throw new MobileError('guest_connection_failed', 'Disconnected', 503);
+      }
+      if (request.path === '/health' && wakes) return {ok:true, runtimeRevision:'000000000000'};
+    }});
+    const started = f.pool.now();
+    await f.pool.wake(A); await f.pool.starts.get(A);
+    assert.equal(wakes, 1);
+    assert.equal(f.pool.now() - started, Math.min(firstElapsed + 30_000, 630_000));
+    assert.equal((await f.pool.status(A)).device.lastError, 'guest_connection_failed');
+  });
 });
 
 test('guest wake only copies the recognized keyboard warning into public and persisted status', async t => {

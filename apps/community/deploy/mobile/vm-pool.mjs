@@ -117,6 +117,40 @@ export class VMPool {
     return this.bounded(signal => this.request(this.spec(device), {method, path:route, body, timeoutMs, binary, signal}), timeoutMs, 'guest_request_timeout');
   }
 
+  async wakeGuest(device) {
+    // A cloud-init broker restart can sever the first request after health
+    // succeeds. One recovery shares the original deadline; it cannot grant
+    // Android another full boot window or retry an actual boot failure.
+    const end = this.now() + this.config.wakeMs + 30_000;
+    const send = () => {
+      const remaining = end - this.now();
+      if (remaining <= 0) throw fail('guest_request_timeout', 'The private mobile request timed out.');
+      return this.delegate(device, 'wake', {method:'POST', body:{}, timeoutMs:remaining});
+    };
+    try {return await send();}
+    catch (error) {
+      if (!(error instanceof MobileError) || !['guest_connection_failed', 'guest_request_cancelled'].includes(error.code)) throw error;
+      const recoveryEnd = Math.min(end, this.now() + 30_000);
+      let ready = false;
+      for (let attempts = 0; attempts < 30 && this.now() < recoveryEnd; attempts++) {
+        if (!await this.runtimeCall('isRunning', device, Math.min(this.config.requestMs, recoveryEnd - this.now()))) {
+          device.vmRunning = false;
+          throw fail('vm_start_failed', 'The mobile VM stopped before Android could start.');
+        }
+        const remaining = recoveryEnd - this.now();
+        if (remaining <= 0) break;
+        try {
+          const health = await this.delegate(device, 'health', {timeoutMs:Math.min(3000, remaining)});
+          ready = health?.ok === true && health.runtimeRevision === this.config.expectedGuestRevision;
+        } catch { /* The approved guest broker may still be restarting. */ }
+        if (ready) break;
+        if (this.now() < recoveryEnd) await this.pause(Math.min(1000, recoveryEnd - this.now()));
+      }
+      if (!ready) throw error;
+      return send();
+    }
+  }
+
   view(device) {
     return {roomId:device.roomId, state:device.state, lastActiveAt:device.lastActiveAt, leaseExpiresAt:device.leaseExpiresAt,
       ...(device.lastError ? {lastError:device.lastError} : {})};
@@ -303,7 +337,7 @@ export class VMPool {
         if (!ready) throw fail('vm_boot_timeout', 'The private mobile VM did not finish starting.');
         // Guest readiness owns its boot limit; transport also needs time for
         // Docker startup and the final running/keyboard-warning response.
-        const result = await this.delegate(device, 'wake', {method:'POST', body:{}, timeoutMs:this.config.wakeMs + 30_000});
+        const result = await this.wakeGuest(device);
         if (result?.device?.roomId !== id || result.device.state !== 'running') throw fail('device_boot_timeout', 'Android did not finish starting.');
         if (this.startingLeases.has(id)) device.leaseExpiresAt = this.startingLeases.get(id);
         device.state = 'running'; device.lastActiveAt = this.now();
