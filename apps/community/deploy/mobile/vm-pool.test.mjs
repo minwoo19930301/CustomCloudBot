@@ -6,7 +6,7 @@ import {mkdtemp, readFile, writeFile, rm, stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {VMPool, vmConfiguration, guestToken, requestGuest} from './vm-pool.mjs';
-import {createServer} from './service.mjs';
+import {BROKER_RUNTIME_REVISION, createServer} from './service.mjs';
 
 const A = '12345678-1234-4234-8234-123456789abc';
 const B = '87654321-4321-4321-8321-cba987654321';
@@ -36,7 +36,7 @@ async function fixture(t, options = {}) {
       const result = await options.request(spec, request);
       if (result !== undefined) return result;
     }
-    if (request.path === '/health') return {ok:true};
+    if (request.path === '/health') return {ok:true, runtimeRevision:BROKER_RUNTIME_REVISION};
     if (request.path.endsWith('/screenshot')) return PNG;
     if (request.path.endsWith('/observe')) return {width:720, height:1280, nodes:[]};
     return {device:{roomId:spec.roomId, state:'running'}};
@@ -179,6 +179,81 @@ test('guest readiness failure stops its VM and exposes a retryable state without
   assert.equal(status.device.state,'error'); assert.equal(status.device.lastError,'vm_boot_timeout');
   assert.equal(f.running.size,0); assert.equal(status.capacity.running,0);
   assert.ok(!JSON.stringify(status).includes(guestToken(TOKEN,A)));
+});
+
+test('a booted guest keyboard warning keeps the VM usable and an explicit wake retries initialization', async t => {
+  let warning = true;
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/wake')) return {device:{roomId:spec.roomId, state:'running', ...(warning ? {lastError:'device_keyboard_timeout'} : {})}};
+  }});
+  const first = await ready(f.pool, A);
+  assert.equal(first.device.lastError, 'device_keyboard_timeout');
+  assert.equal(first.capacity.running, 1);
+  assert.ok(f.running.has(A));
+  assert.equal(f.calls.some(call => call.name === 'stop'), false);
+  assert.equal(JSON.parse(await readFile(path.join(f.directory, 'vm-pool.json'), 'utf8')).devices[0].lastError, 'device_keyboard_timeout');
+  assert.deepEqual(await f.pool.screenshot(A), PNG);
+  await f.pool.input(A, {type:'key', key:'HOME'});
+  assert.equal((await ready(f.pool, A)).device.lastError, 'device_keyboard_timeout');
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 2);
+  warning = false;
+  assert.equal((await ready(f.pool, A)).device.lastError, undefined);
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 3);
+  await f.pool.wake(A);
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 3);
+  assert.equal(f.calls.filter(call => call.name === 'start').length, 1);
+  assert.equal(f.calls.some(call => call.name === 'stop'), false);
+});
+
+test('guest wake transport allows Docker and response overhead beyond the unchanged boot limit', async t => {
+  const f = await fixture(t, {config:{wakeMs:600_000}, request:async (spec, request) => {
+    if (request.path.endsWith('/wake')) {
+      assert.equal(request.timeoutMs, 630_000);
+      return {device:{roomId:spec.roomId, state:'running', lastError:'device_keyboard_timeout'}};
+    }
+  }});
+  const status = await ready(f.pool, A);
+  assert.equal(f.config.wakeMs, 600_000);
+  assert.equal(status.device.lastError, 'device_keyboard_timeout');
+  assert.equal(f.calls.some(call => call.name === 'stop'), false);
+  await f.pool.input(A, {type:'key', key:'HOME'});
+  assert.equal(f.requests.find(request => request.path.endsWith('/input')).timeoutMs, f.config.requestMs);
+});
+
+test('guest wake only copies the recognized keyboard warning into public and persisted status', async t => {
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/wake')) return {device:{roomId:spec.roomId, state:'running', lastError:spec.token}};
+  }});
+  const status = await ready(f.pool, A);
+  assert.equal(status.device.lastError, undefined);
+  assert.ok(!JSON.stringify(status).includes(guestToken(TOKEN, A)));
+  assert.ok(!(await readFile(path.join(f.directory, 'vm-pool.json'), 'utf8')).includes(guestToken(TOKEN, A)));
+});
+
+test('host waits for the approved running broker revision before asking Android to wake', async t => {
+  let healthCalls = 0;
+  const f = await fixture(t, {config:{bootMs:5000}, request:async (spec, request) => {
+    if (request.path === '/health') {
+      healthCalls++;
+      return {ok:true, ...(healthCalls === 1 ? {} : {runtimeRevision:healthCalls === 2 ? '000000000000' : BROKER_RUNTIME_REVISION})};
+    }
+    if (request.path.endsWith('/wake')) assert.equal(healthCalls, 3);
+  }});
+  assert.equal(f.config.expectedGuestRevision, BROKER_RUNTIME_REVISION);
+  await ready(f.pool, A);
+  assert.equal(healthCalls, 3);
+  assert.equal(f.requests.filter(request => request.path.endsWith('/wake')).length, 1);
+});
+
+test('a stale broker that never restarts cannot receive the wake request', async t => {
+  const f = await fixture(t, {config:{bootMs:2000}, request:async (spec, request) => {
+    if (request.path === '/health') return {ok:true, runtimeRevision:'000000000000'};
+  }});
+  await f.pool.wake(A);
+  await f.pool.starts.get(A);
+  assert.equal((await f.pool.status(A)).device.lastError, 'vm_boot_timeout');
+  assert.equal(f.requests.some(request => request.path.endsWith('/wake')), false);
+  assert.equal(f.running.size, 0);
 });
 
 test('wrong-room guest response cannot mark Android ready and unsuccessful stop still occupies capacity', async t => {

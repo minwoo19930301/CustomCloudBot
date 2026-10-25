@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
 import { configuration, DevicePool, parseUiTree, roomId } from './device-pool.mjs';
-import { createServer, listenServer } from './service.mjs';
+import { BROKER_RUNTIME_REVISION, createServer, listenServer } from './service.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
@@ -19,8 +20,8 @@ async function fixture(t, overrides = {}) {
   const config = { ...configuration({ MOBILE_BROKER_TOKEN: TOKEN, MOBILE_ANDROID_IMAGE: 'operator/android:test', MOBILE_DATA_DIR: dataDir }), ...overrides };
   const containers = new Map(), calls = [];
   let time = 1_000_000;
-  const run = async (file, args) => {
-    calls.push({ file, args: [...args] });
+  const run = async (file, args, options = {}) => {
+    calls.push({ file, args: [...args], options });
     if (file === 'docker') {
       const operation = args[0];
       if (operation === 'inspect') {
@@ -59,6 +60,15 @@ test('configuration requires explicit private authentication and operator image'
   assert.throws(() => configuration({}), /MOBILE_ANDROID_IMAGE/);
   assert.throws(() => configuration({ MOBILE_ANDROID_IMAGE: 'image' }), /MOBILE_BROKER_TOKEN/);
   assert.throws(() => configuration({ MOBILE_ANDROID_IMAGE: 'image', MOBILE_BROKER_TOKEN: TOKEN, MOBILE_DOCKER_DEVICES_JSON: '["/etc/passwd"]' }), /device mapping/);
+});
+
+test('software Android boot allowance accepts at most ten minutes', () => {
+  const env = { MOBILE_ANDROID_IMAGE: 'image', MOBILE_BROKER_TOKEN: TOKEN };
+  assert.equal(configuration(env).bootMs, 90_000);
+  assert.equal(configuration({ ...env, MOBILE_BOOT_SECONDS: '600' }).bootMs, 600_000);
+  for (const value of ['601', '9', 'Infinity', '600.1']) {
+    assert.throws(() => configuration({ ...env, MOBILE_BOOT_SECONDS: value }), /MOBILE_BOOT_SECONDS/);
+  }
 });
 
 test('optional Docker network accepts a dedicated name and rejects modes or unsafe syntax', () => {
@@ -252,6 +262,86 @@ test('configured IME is enabled and selected before Android is reported ready', 
   assert.equal((await pool.wake(A)).device.state, 'running');
   const commands = calls.filter(item => item.file === 'adb' && item.args.includes('shell')).map(item => item.args.at(-1));
   assert.deepEqual(commands, ["'getprop' 'sys.boot_completed'", `'ime' 'enable' '${inputIme}'`, `'ime' 'set' '${inputIme}'`]);
+  assert.deepEqual(calls.filter(item => item.args.at(-1).startsWith("'ime'")).map(item => item.options.timeout), [30_000, 30_000]);
+});
+
+test('slow software Android keyboard setup may take more than five seconds per command', async t => {
+  const { pool, advance } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME', bootMs: 60_000 });
+  const previous = pool.run, started = pool.now();
+  pool.run = async (file, args, options) => {
+    const duration = args.at(-1).startsWith("'ime' 'enable'") ? 7000 : args.at(-1).startsWith("'ime' 'set'") ? 9000 : 0;
+    if (duration) {
+      advance(Math.min(duration, options.timeout));
+      if (duration > options.timeout) throw new Error('command timed out');
+    }
+    return previous(file, args, options);
+  };
+  assert.equal((await pool.wake(A)).device.state, 'running');
+  assert.equal(pool.now() - started, 16_000);
+});
+
+test('transient IME selection timeout retries within the same boot deadline', async t => {
+  const { pool, advance, calls } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME', bootMs: 60_000 });
+  const previous = pool.run, started = pool.now();
+  let selections = 0;
+  pool.run = async (file, args, options) => {
+    const output = await previous(file, args, options);
+    if (args.at(-1).startsWith("'ime' 'set'")) {
+      selections++;
+      if (selections === 1) { advance(options.timeout); throw new Error('command timed out'); }
+      advance(7000);
+    }
+    return output;
+  };
+  const status = await pool.wake(A);
+  assert.equal(status.device.state, 'running');
+  assert.equal(status.device.lastError, undefined);
+  assert.equal(selections, 2);
+  assert.equal(calls.filter(item => item.args.at(-1).startsWith("'ime' 'enable'")).length, 1);
+  assert.deepEqual(calls.filter(item => item.args.at(-1).startsWith("'ime' 'set'")).map(item => item.options.timeout), [30_000, 29_000]);
+  assert.equal(pool.now() - started, 38_000);
+});
+
+test('late Android readiness leaves only the remaining deadline for IME initialization', async t => {
+  const { pool, advance, calls, containers } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME', bootMs: 10_000 });
+  const previous = pool.run, started = pool.now();
+  pool.run = async (file, args, options) => {
+    const output = await previous(file, args, options);
+    if (file !== 'adb') return output;
+    assert.ok(options.timeout > 0 && options.timeout <= started + 10_000 - pool.now());
+    if (args[0] === 'connect') advance(8000);
+    if (args.at(-1).startsWith("'getprop'")) advance(1000);
+    if (args.at(-1).startsWith("'ime' 'enable'")) { advance(options.timeout); throw new Error('command timed out'); }
+    return output;
+  };
+  const status = await pool.wake(A);
+  assert.equal(status.device.state, 'running');
+  assert.equal(status.device.lastError, 'device_keyboard_timeout');
+  assert.equal(pool.now() - started, 10_000);
+  assert.equal(calls.find(item => item.args.at(-1).startsWith("'ime' 'enable'")).options.timeout, 1000);
+  assert.equal(calls.some(item => item.args.at(-1).startsWith("'ime' 'set'")), false);
+  assert.equal(containers.get(pool.name(pool.devices.get(A))).State.Running, true);
+  assert.equal(calls.some(item => item.file === 'docker' && item.args[0] === 'stop'), false);
+});
+
+test('Android that never boots still times out, with ADB work capped to the remaining deadline', async t => {
+  const { pool, advance, calls, containers } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME', bootMs: 10_000 });
+  const previous = pool.run, started = pool.now();
+  pool.run = async (file, args, options) => {
+    const output = await previous(file, args, options);
+    if (file !== 'adb') return output;
+    assert.ok(options.timeout > 0 && options.timeout <= started + 10_000 - pool.now());
+    if (args[0] === 'connect') advance(8000);
+    if (args.at(-1).startsWith("'getprop'")) { advance(options.timeout); return ''; }
+    return output;
+  };
+  await assert.rejects(pool.wake(A), { code: 'device_boot_timeout', status: 503 });
+  assert.equal(pool.now() - started, 10_000);
+  assert.equal(calls.find(item => item.args.at(-1).startsWith("'getprop'")).options.timeout, 2000);
+  assert.equal(calls.some(item => item.args.at(-1).startsWith("'ime'")), false);
+  assert.equal((await pool.status(A)).device.lastError, 'device_boot_timeout');
+  assert.equal(pool.devices.get(A).state, 'error');
+  assert.equal(containers.get(pool.name(pool.devices.get(A))).State.Running, false);
 });
 
 test('headless app launch resolves and starts only the requested package activity', async t => {
@@ -286,16 +376,31 @@ test('missing, malformed or cross-package launcher results never start an activi
   assert.equal(calls.some(item => item.file === 'adb' && item.args.at(-1).startsWith("'am' 'start'")), false);
 });
 
-test('IME selection failure does not report a device ready for text', async t => {
+test('IME failure preserves a booted Android for screen and keys, then wake can repair text input', async t => {
   const { pool, calls } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME', bootMs: 1000 });
   const previous = pool.run;
+  let fail = true;
   pool.run = async (file, args, options) => {
-    if (file === 'adb' && args.at(-1).startsWith("'ime' 'set'")) throw new Error('IME unavailable');
+    if (fail && file === 'adb' && args.at(-1).startsWith("'ime' 'set'")) throw new Error('IME unavailable');
     return previous(file, args, options);
   };
-  await assert.rejects(pool.wake(A), { code: 'device_boot_timeout' });
-  assert.equal(pool.devices.get(A).state, 'error');
-  assert.ok(calls.some(item => item.file === 'docker' && item.args[0] === 'stop'));
+  assert.equal((await pool.wake(A)).device.state, 'running');
+  const status = await pool.status(A);
+  assert.equal(status.device.state, 'running');
+  assert.equal(status.device.lastError, 'device_keyboard_timeout');
+  assert.equal(status.capacity.running, 1);
+  const stored = JSON.parse(await readFile(pool.stateFile, 'utf8')).devices[0];
+  assert.equal(stored.state, 'running');
+  assert.equal(stored.lastError, 'device_keyboard_timeout');
+  assert.equal(calls.some(item => item.file === 'docker' && item.args[0] === 'stop'), false);
+  assert.deepEqual(await pool.screenshot(A), png);
+  assert.deepEqual(await pool.input(A, { type: 'key', key: 'HOME' }), { ok: true });
+  await assert.rejects(pool.input(A, { type: 'text', text: '한글' }), /IME unavailable/);
+  assert.equal(calls.some(item => item.args.at(-1).includes('ADB_INPUT_B64')), false);
+  fail = false;
+  assert.equal((await pool.wake(A)).device.lastError, undefined);
+  assert.deepEqual(await pool.input(A, { type: 'text', text: '한글' }), { ok: true });
+  assert.equal(calls.filter(item => item.file === 'docker' && item.args[0] === 'create').length, 1);
 });
 
 test('Unicode is explicit and base64 input targets only the configured IME for user zero', async t => {
@@ -352,6 +457,7 @@ test('HTTP requires bearer on every route, rejects unsafe bodies, and returns ty
   assert.equal((await fetch(`${base}/health`)).status, 401);
   assert.equal((await fetch(`${base}/devices/${A}/wake`, { method: 'POST' })).status, 401);
   assert.equal((await fetch(`${base}/health`, { headers: auth })).status, 200);
+  assert.equal((await (await fetch(`${base}/health`, { headers: auth })).json()).runtimeRevision, BROKER_RUNTIME_REVISION);
   assert.equal((await fetch(`${base}/devices/${A}/wake`, { method: 'POST', headers: auth, body: '{}' })).status, 415);
   const headers = { ...auth, 'Content-Type': 'application/json' };
   assert.equal((await fetch(`${base}/devices/${A}/wake`, { method: 'POST', headers, body: '{' })).status, 400);
@@ -364,6 +470,27 @@ test('HTTP requires bearer on every route, rejects unsafe bodies, and returns ty
   assert.equal(screenshot.headers.get('content-type'), 'image/png');
   assert.deepEqual(Buffer.from(await screenshot.arrayBuffer()), png);
   assert.equal((await fetch(`${base}/health?token=bad`, { headers: auth })).status, 400);
+});
+
+test('broker revision identifies loaded code and remains fixed when files are replaced before restart', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'ccb-mobile-revision-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const file of ['device-pool.mjs', 'service.mjs']) {
+    await writeFile(path.join(directory, file), await readFile(new URL(file, import.meta.url)));
+  }
+  const url = pathToFileURL(path.join(directory, 'service.mjs')).href;
+  const loaded = await import(url);
+  assert.match(loaded.BROKER_RUNTIME_REVISION, /^[a-f0-9]{12}$/);
+  assert.equal(loaded.BROKER_RUNTIME_REVISION, BROKER_RUNTIME_REVISION);
+  const updatedPool = await readFile(path.join(directory, 'device-pool.mjs'), 'utf8');
+  await writeFile(path.join(directory, 'device-pool.mjs'), updatedPool + '\n// Newly installed broker, not loaded by the old process.\n');
+  const server = loaded.createServer({ health: async () => ({ ok: true }) }, TOKEN);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  assert.equal((await response.json()).runtimeRevision, BROKER_RUNTIME_REVISION);
+  const restarted = await import(url + '?restarted');
+  assert.notEqual(restarted.BROKER_RUNTIME_REVISION, loaded.BROKER_RUNTIME_REVISION);
 });
 
 test('Unix socket listener opens no TCP port and retains bearer authentication', async t => {

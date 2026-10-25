@@ -99,10 +99,20 @@ export function createVMRuntime(env = process.env, {run = runVMCommand, controll
     if (['inactive', 'failed'].includes(state)) return false;
     throw fail();
   };
+  const prepareSeed = async (spec, temporarySeed, gid, signal) => {
+    await rm(temporarySeed, {force:true});
+    abort(signal);
+    await command(config.python, [config.seedScript], {signal, timeoutMs:30000,
+      input:JSON.stringify({roomId:spec.roomId, token:spec.token, output:temporarySeed})});
+    await check(temporarySeed);
+    await chown(temporarySeed, controllerUid, gid); await chmod(temporarySeed, 0o640);
+    abort(signal);
+  };
   return {
     async provision(spec, {signal} = {}) {
       validateVMSpec(spec, config); abort(signal);
       const {uid, gid} = await vmIdentity(signal);
+      if (await isRunning(spec, {signal})) throw fail();
       await check(config.dataDir, {directory:true});
       await check(config.baseDir, {directory:true});
       for (const file of [config.goldenImage, config.kernel, config.initrd]) await check(file);
@@ -119,6 +129,16 @@ export function createVMRuntime(env = process.env, {run = runVMCommand, controll
         await sameMetadata(spec);
         await check(target.disk, {writable:true, uid});
         await check(target.seed);
+        const temporarySeed = target.seed + '.tmp';
+        try {
+          await prepareSeed(spec, temporarySeed, gid, signal);
+          // Only stopped VMs can replace their CIDATA image. Preserve the disk
+          // and immutable slot metadata; a failed refresh retains the old seed.
+          if (await isRunning(spec, {signal})) throw fail();
+          abort(signal);
+          await rename(temporarySeed, target.seed);
+        } catch {throw fail();}
+        finally {await rm(temporarySeed, {force:true}).catch(() => {});}
         return;
       }
       if (await isRunning(spec, {signal})) throw fail();
@@ -133,16 +153,14 @@ export function createVMRuntime(env = process.env, {run = runVMCommand, controll
         await command(config.qemuImg, ['create', '-f', 'qcow2', '-F', 'qcow2', '-b', config.goldenImage, temporaryDisk, '12G'], {signal, timeoutMs:30000});
         await check(temporaryDisk);
         await chown(temporaryDisk, uid, gid); await chmod(temporaryDisk, 0o600);
-        await command(config.python, [config.seedScript], {signal, timeoutMs:30000,
-          input:JSON.stringify({roomId:spec.roomId, token:spec.token, output:temporarySeed})});
-        await check(temporarySeed);
-        await chown(temporarySeed, controllerUid, gid); await chmod(temporarySeed, 0o640);
+        await prepareSeed(spec, temporarySeed, gid, signal);
         await writeFile(temporaryMetadata, JSON.stringify(metadata(spec)), {mode:0o640, flag:'wx'});
         await chown(temporaryMetadata, controllerUid, gid);
         // The broker uses UMask=0077. Creation's mode is masked, so grant the
         // VM group read access explicitly before publishing this root-owned file.
         await chmod(temporaryMetadata, 0o640);
         abort(signal);
+        if (await isRunning(spec, {signal})) throw fail();
         await rename(temporarySeed, target.seed);
         await rename(temporaryMetadata, target.metadata);
         // Disk is the completion marker. It is published last, only after the

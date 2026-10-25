@@ -66,6 +66,30 @@ commands or paths. `MOBILE_VM_SEED_PYTHON` and `MOBILE_VM_SEED_SCRIPT` may point
 administrator-installed root-owned equivalents. Do not allow untrusted accounts
 to change those settings or code files.
 
+The seed builder also reads the fixed sibling `device-pool.mjs` and `service.mjs`
+from its root-owned installation directory. Both must be non-symlink regular
+files, root-owned, not group/world writable, and at most 256 KiB each. No request
+can supply a source path or source code. CIDATA installs these two audited files
+as root:root 0644 under `/opt/customcloudbot-mobile` inside the guest, then restarts
+its broker. Broker-only updates therefore do not require rebuilding the golden
+Android image or replacing a room's disk.
+
+When provisioning an existing **stopped** VM, the adapter builds `seed.iso.tmp`,
+checks its private permissions, and atomically replaces `seed.iso`. It preserves
+`disk.qcow2` and `runtime.json`; a failed build retains the old seed and removes
+the partial replacement. It rejects an active VM before building a seed and
+rechecks that it remains stopped before publication. The pool must serialize
+provision/start for each room.
+
+The NoCloud instance ID is `customcloudbot-mobile-<room>-runtime-v2-<revision>`,
+where revision is the first 12 hexadecimal characters of
+`SHA256(device-pool.mjs UTF-8 bytes + NUL + service.mjs UTF-8 bytes)` in that exact
+order. Unchanged code keeps the instance ID stable; updated code causes
+cloud-init to install the new broker on the next boot while keeping the room's
+persistent data. Tokens and keys are excluded from the hash. Changing only the
+token does **not** trigger cloud-init again, so credential rotation still needs
+an explicit stopped-instance reinitialization plan.
+
 ## Initial setup evidence (2026-10-25)
 
 Read-only inspection of the existing OCI host confirmed the following setup:
@@ -114,8 +138,10 @@ app container starts or is recreated with its bind mount.
 
 The first OCI VM reached the guest HTTP broker about 4 minutes 16 seconds after
 QEMU startup. The configuration was therefore extended to
-`MOBILE_VM_BOOT_SECONDS=600`, overriding the code's 180-second default; Android
-readiness has a separate 300-second deadline. HTTP availability alone does not
+`MOBILE_VM_BOOT_SECONDS=600`, overriding the code's 180-second default. The updated
+instance seed also sets the guest's separate Android boot deadline to
+`MOBILE_BOOT_SECONDS=600`; align the host pool's Android wait budget with it.
+HTTP availability alone does not
 prove Android is ready. Both guest boot and Android readiness happen in
 the background; the private wake HTTP response is prompt and reports `starting`.
 Status must become `running` only after the room-specific guest reports a real
@@ -146,6 +172,12 @@ capture active Docker databases or a token already used for production rooms.
 The seed uses a unique instance ID for each room and creates no login account.
 The golden guest must not contain a common active SSH key/password. Each room's
 broker is enabled after its private environment is installed.
+
+SSH stays disabled in the sealed guest. The instance seed sets
+`ssh_genkeytypes: []` to skip unnecessary host-key generation during TCG boot.
+An operator deliberately restoring SSH access must first run `ssh-keygen -A`
+inside that guest and configure a new private recovery key; no shared bootstrap
+key or SSH forwarding port is retained by this runtime.
 
 The token appears only in CIDATA user-data, cloud-init's private retained
 user-data, and `/etc/customcloudbot-mobile.instance.env` (0600). It is not put in

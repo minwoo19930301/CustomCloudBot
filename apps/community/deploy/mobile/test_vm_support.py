@@ -1,5 +1,7 @@
 import importlib.util
+import hashlib
 import json
+import os
 from pathlib import Path
 import socket
 import stat
@@ -25,6 +27,8 @@ poweroff = load('vm-poweroff')
 bootlog = load('vm-bootlog')
 # Real reserved personal-room ID: hexadecimal shape, non-RFC variant bits.
 ROOM = 'f6f6cd49-10f4-6102-2f64-da6554d8dba8'
+SOURCES = {'device-pool.mjs': '// 기기 풀\nexport class DevicePool {}\n', 'service.mjs': '// service\nexport function start() {}\n'}
+REVISION = hashlib.sha256((SOURCES['device-pool.mjs'] + '\0' + SOURCES['service.mjs']).encode()).hexdigest()[:12]
 
 
 class SeedTests(unittest.TestCase):
@@ -32,36 +36,106 @@ class SeedTests(unittest.TestCase):
         for room in [ROOM, '11111111-1111-4111-8111-111111111111', '00000000-0000-0000-0000-000000000000']:
             for module in [seed, launch, poweroff]:
                 self.assertIsNotNone(module.UUID.fullmatch(room))
-            docs = seed.seed_documents({'roomId': room, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'})
-            self.assertEqual(json.loads(docs['meta-data'])['instance-id'], 'customcloudbot-mobile-' + room)
+            docs = seed.seed_documents({'roomId': room, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}, SOURCES)
+            self.assertEqual(json.loads(docs['meta-data'])['instance-id'], 'customcloudbot-mobile-' + room + '-runtime-v2-' + REVISION)
         for room in [ROOM + '\n', ROOM + '\r', ROOM + '/', ROOM + '%2f', ROOM[1:], ROOM.replace('-', '/', 1), '../' + ROOM]:
             with self.assertRaises(ValueError):
-                seed.seed_documents({'roomId': room, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'})
+                seed.seed_documents({'roomId': room, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}, SOURCES)
             with self.assertRaises(ValueError):
                 launch.launch_args(room, uid=986)
             with self.assertRaises(ValueError):
                 poweroff.poweroff(room)
 
-    def test_private_seed_overrides_only_instance_identity(self):
+    def test_private_seed_installs_only_approved_broker_sources_and_instance_settings(self):
         token = 'a' * 64
-        docs = seed.seed_documents({'roomId': ROOM, 'token': token, 'output': '/unused/seed.iso.tmp'})
+        docs = seed.seed_documents({'roomId': ROOM, 'token': token, 'output': '/unused/seed.iso.tmp'}, SOURCES)
         data = json.loads(docs['user-data'].decode().split('\n', 1)[1])
         files = data['write_files']
         env = files[0]
         self.assertEqual(env['permissions'], '0600')
         self.assertIn('MOBILE_BROKER_TOKEN=' + token, env['content'])
         self.assertIn('MOBILE_MAX_SLOTS=1\nMOBILE_MAX_RUNNING=1', env['content'])
+        self.assertIn('MOBILE_BOOT_SECONDS=600\n', env['content'])
         self.assertNotIn('MOBILE_ANDROID_IMAGE', env['content'])
         self.assertNotIn(token, json.dumps(data['runcmd']))
         self.assertNotIn(token, docs['meta-data'].decode())
         self.assertEqual(data['users'], [])
+        self.assertEqual(data['ssh_genkeytypes'], [])
+        self.assertEqual(files[2:], [{'path': '/opt/customcloudbot-mobile/' + name, 'owner': 'root:root', 'permissions': '0644', 'content': SOURCES[name]} for name in seed.SOURCE_NAMES])
         self.assertEqual(data['runcmd'][-1], ['systemctl', 'restart', 'customcloudbot-mobile.service'])
+
+    def test_seed_instance_changes_only_for_broker_code_not_token_or_mapping_order(self):
+        request = {'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}
+        def identity(value, sources):
+            return json.loads(seed.seed_documents(value, sources)['meta-data'])['instance-id']
+        original = identity(request, SOURCES)
+        self.assertEqual(original, identity({**request, 'token': 'b' * 64}, SOURCES))
+        self.assertEqual(original, identity(request, dict(reversed(list(SOURCES.items())))))
+        for name in seed.SOURCE_NAMES:
+            self.assertNotEqual(original, identity(request, {**SOURCES, name: SOURCES[name] + '// update\n'}))
+
+    def test_seed_rejects_missing_extra_unbounded_and_nontext_sources(self):
+        request = {'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}
+        for sources in [{}, {'service.mjs': SOURCES['service.mjs']}, {**SOURCES, 'extra.mjs': 'unapproved'},
+                        {**SOURCES, 'service.mjs': ''}, {**SOURCES, 'service.mjs': b'bytes'},
+                        {**SOURCES, 'service.mjs': '한' * (seed.SOURCE_LIMIT // 3 + 1)}]:
+            with self.assertRaises(ValueError):
+                seed.seed_documents(request, sources)
+
+    def test_source_loader_bounds_reads_and_rejects_nonregular_or_writable_code(self):
+        with tempfile.TemporaryDirectory(prefix='ccb-seed-source-') as directory:
+            root = Path(directory)
+            for name, content in SOURCES.items():
+                (root / name).write_text(content, encoding='utf8')
+                (root / name).chmod(0o644)
+            self.assertEqual(seed.approved_sources(root, owner_uid=os.getuid()), SOURCES)
+            with self.assertRaises(ValueError):
+                seed.approved_sources(root, owner_uid=os.getuid() + 1)
+            root.chmod(0o770)
+            with self.assertRaises(ValueError):
+                seed.approved_sources(root, owner_uid=os.getuid())
+            root.chmod(0o700)
+            source = root / 'service.mjs'
+            for mode in [0o664, 0o646]:
+                source.chmod(mode)
+                with self.assertRaises(ValueError):
+                    seed.approved_sources(root, owner_uid=os.getuid())
+            source.chmod(0o644)
+            source.write_bytes(b'x' * (seed.SOURCE_LIMIT + 1))
+            with self.assertRaises(ValueError):
+                seed.approved_sources(root, owner_uid=os.getuid())
+            source.unlink()
+            source.symlink_to(root / 'device-pool.mjs')
+            with self.assertRaises(OSError):
+                seed.approved_sources(root, owner_uid=os.getuid())
+            source.unlink()
+            os.link(root / 'device-pool.mjs', source)
+            with self.assertRaises(ValueError):
+                seed.approved_sources(root, owner_uid=os.getuid())
+            source.unlink()
+            os.mkfifo(source, 0o600)
+            with self.assertRaises(ValueError):
+                seed.approved_sources(root, owner_uid=os.getuid())
+
+    def test_source_loader_checks_file_owner_after_open(self):
+        with tempfile.TemporaryDirectory(prefix='ccb-seed-owner-') as directory:
+            root = Path(directory)
+            for name, content in SOURCES.items():
+                (root / name).write_text(content)
+                (root / name).chmod(0o644)
+            real_fstat = os.fstat
+            def foreign_owned(fd):
+                info = real_fstat(fd)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1, st_nlink=info.st_nlink, st_size=info.st_size)
+            with patch.object(seed.os, 'fstat', foreign_owned):
+                with self.assertRaises(ValueError):
+                    seed.approved_sources(root, owner_uid=os.getuid())
 
     def test_untrusted_seed_fields_are_rejected(self):
         request = {'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}
         for change in [{'roomId': '../other'}, {'token': 'x\nMOBILE_DOCKER_PRIVILEGED=true'}, {'command': 'sh'}]:
             with self.assertRaises(ValueError):
-                seed.seed_documents({**request, **change})
+                seed.seed_documents({**request, **change}, SOURCES)
 
     def test_launcher_rejects_root_or_an_arbitrary_instance_before_file_reads(self):
         for room, uid in [(ROOM, 0), ('../../etc', 986), (ROOM + ';command', 986)]:

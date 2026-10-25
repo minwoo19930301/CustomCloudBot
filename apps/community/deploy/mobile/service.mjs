@@ -1,10 +1,19 @@
 import http from 'node:http';
 import net from 'node:net';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { chmod, lstat, mkdir, unlink } from 'node:fs/promises';
 import { configuration, DevicePool, MobileError } from './device-pool.mjs';
+
+// Capture the loaded runtime once. Reading updated files per request could let
+// an old process advertise a revision whose code it has not actually loaded.
+export const BROKER_RUNTIME_REVISION = createHash('sha256')
+  .update(readFileSync(new URL('./device-pool.mjs', import.meta.url)))
+  .update('\0')
+  .update(readFileSync(new URL('./service.mjs', import.meta.url)))
+  .digest('hex').slice(0, 12);
 
 function authorized(request, token) {
   const supplied = Buffer.from(request.headers.authorization || '');
@@ -40,7 +49,7 @@ export function createServer(pool, token) {
     try {
       const url = new URL(request.url, 'http://mobile.internal');
       if (url.search) throw new MobileError('invalid_request', 'Query parameters are not accepted.');
-      if (request.method === 'GET' && url.pathname === '/health') { send(response, 200, await pool.health()); return; }
+      if (request.method === 'GET' && url.pathname === '/health') { send(response, 200, { ...await pool.health(), runtimeRevision: BROKER_RUNTIME_REVISION }); return; }
       const match = /^\/devices\/([^/]+)(?:\/(wake|sleep|lease|screenshot|observe|input|launch))?$/.exec(url.pathname);
       if (!match) throw new MobileError('not_found', 'This route does not exist.', 404);
       const [, room, action] = match;

@@ -16,7 +16,7 @@ async function fixture(t) {
   for (const name of ['golden.qcow2', 'Image', 'initrd']) await writeFile(path.join(dataDir, 'base', name), 'fixture', {mode:0o640});
   const env = {MOBILE_VM_DATA_DIR:dataDir};
   const calls = [], states = new Map();
-  let seedFails = false, imageInfo = {format:'qcow2', 'virtual-size':12 * 1024 ** 3}, freeGiB = 30;
+  let seedFails = false, seedVersion = 0, onSeed, imageInfo = {format:'qcow2', 'virtual-size':12 * 1024 ** 3}, freeGiB = 30;
   const run = async (command, args, options = {}) => {
     calls.push({command, args, options});
     if (command === '/usr/bin/id') return {stdout:String(args[0] === '-u' ? process.getuid() : process.getgid())};
@@ -37,16 +37,17 @@ async function fixture(t) {
     }
     assert.equal(command, '/opt/customcloudbot-mobile/seed-venv/bin/python');
     assert.deepEqual(args, ['/opt/customcloudbot-mobile/vm-seed.py']);
-    if (seedFails) throw Error('failure that accidentally includes ' + TOKEN);
     const request = JSON.parse(options.input);
     assert.equal(request.token, TOKEN);
-    await writeFile(request.output, 'private fake ISO', {mode:0o600});
+    await writeFile(request.output, 'private fake ISO ' + ++seedVersion, {mode:0o600});
+    if (seedFails) throw Error('failure that accidentally includes ' + TOKEN);
+    await onSeed?.();
     return {stdout:''};
   };
   const runtime = createVMRuntime(env, {run, controllerUid:process.getuid(), diskSpace:async () => ({bavail:BigInt(freeGiB) * 1024n ** 3n, bsize:1n})});
   const spec = {roomId:A, slot:0, unitName:`customcloudbot-mobile-vm@${A}.service`, port:18091,
     dataDir:path.join(dataDir, 'rooms', A), token:TOKEN};
-  return {runtime, spec, env, dataDir, calls, states, failSeed:() => {seedFails = true;}, imageInfo:info => {imageInfo = info;}, freeSpace:gib => {freeGiB = gib;}};
+  return {runtime, spec, env, dataDir, calls, states, failSeed:() => {seedFails = true;}, onSeed:callback => {onSeed = callback;}, imageInfo:info => {imageInfo = info;}, freeSpace:gib => {freeGiB = gib;}};
 }
 
 test('untrusted paths, units, slots, ports and tokens never reach a root command', async t => {
@@ -119,6 +120,54 @@ test('partial seed failure cannot publish a bootable disk and does not disclose 
   await assert.rejects(runtime.provision(spec), error => !error.message.includes(TOKEN));
   assert.deepEqual(await readdir(spec.dataDir), []);
   await assert.rejects(runtime.start(spec));
+});
+
+test('stopped VM refresh publishes a new seed atomically and retains its disk and slot metadata', async t => {
+  const {runtime, spec, calls, freeSpace} = await fixture(t);
+  await runtime.provision(spec);
+  const files = Object.fromEntries(['disk.qcow2', 'runtime.json', 'seed.iso'].map(name => [name, path.join(spec.dataDir, name)]));
+  const before = {};
+  for (const [name, file] of Object.entries(files)) before[name] = {stat:await stat(file), content:await readFile(file, 'utf8')};
+  freeSpace(1); // Updating a seed does not allocate a second Android disk.
+  const mask = process.umask(0o077);
+  try {await runtime.provision(spec);} finally {process.umask(mask);}
+  for (const name of ['disk.qcow2', 'runtime.json']) {
+    assert.equal((await stat(files[name])).ino, before[name].stat.ino);
+    assert.equal(await readFile(files[name], 'utf8'), before[name].content);
+  }
+  assert.notEqual((await stat(files['seed.iso'])).ino, before['seed.iso'].stat.ino);
+  assert.notEqual(await readFile(files['seed.iso'], 'utf8'), before['seed.iso'].content);
+  assert.equal((await stat(files['seed.iso'])).mode & 0o777, 0o640);
+  assert.equal(calls.filter(call => call.command === '/usr/bin/qemu-img' && call.args[0] === 'create').length, 1);
+  assert.deepEqual((await readdir(spec.dataDir)).sort(), ['disk.qcow2', 'runtime.json', 'seed.iso']);
+});
+
+test('failed seed refresh retains the old private seed and cleans partial credentials', async t => {
+  const {runtime, spec, failSeed} = await fixture(t);
+  await runtime.provision(spec);
+  const file = path.join(spec.dataDir, 'seed.iso');
+  const before = await stat(file), content = await readFile(file, 'utf8');
+  failSeed();
+  await assert.rejects(runtime.provision(spec), error => !error.message.includes(TOKEN));
+  assert.equal((await stat(file)).ino, before.ino);
+  assert.equal(await readFile(file, 'utf8'), content);
+  assert.deepEqual((await readdir(spec.dataDir)).sort(), ['disk.qcow2', 'runtime.json', 'seed.iso']);
+});
+
+test('running VM cannot regenerate a seed or publish a prepared replacement after a start race', async t => {
+  const {runtime, spec, states, calls, onSeed} = await fixture(t);
+  await runtime.provision(spec);
+  const file = path.join(spec.dataDir, 'seed.iso');
+  const original = await readFile(file, 'utf8');
+  const count = calls.length;
+  states.set(spec.unitName, 'active');
+  await assert.rejects(runtime.provision(spec));
+  assert.equal(calls.slice(count).some(call => call.command.endsWith('/python') || call.command === '/usr/bin/qemu-img'), false);
+  states.set(spec.unitName, 'inactive');
+  onSeed(() => states.set(spec.unitName, 'activating'));
+  await assert.rejects(runtime.provision(spec));
+  assert.equal(await readFile(file, 'utf8'), original);
+  assert.deepEqual((await readdir(spec.dataDir)).sort(), ['disk.qcow2', 'runtime.json', 'seed.iso']);
 });
 
 test('symlinked rooms cannot redirect privileged image or seed writes', async t => {

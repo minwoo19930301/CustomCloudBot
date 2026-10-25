@@ -3,6 +3,7 @@ import {createHmac, randomUUID} from 'node:crypto';
 import {mkdir, readFile, writeFile, rename, lstat, chmod, unlink} from 'node:fs/promises';
 import path from 'node:path';
 import {MobileError, roomId} from './device-pool.mjs';
+import {BROKER_RUNTIME_REVISION} from './service.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
@@ -25,7 +26,7 @@ export function vmConfiguration(env = process.env) {
   const maxSlots = envInt(env, 'MOBILE_MAX_SLOTS', 10, 1, 100);
   const basePort = envInt(env, 'MOBILE_VM_BASE_PORT', 18091, 1024, 65435);
   return {
-    token, dataDir, socket, basePort, maxSlots,
+    token, dataDir, socket, basePort, maxSlots, expectedGuestRevision:BROKER_RUNTIME_REVISION,
     maxRunning:envInt(env, 'MOBILE_MAX_RUNNING', 1, 1, 10),
     idleMs:envInt(env, 'MOBILE_IDLE_SECONDS', 600, 60, 86400) * 1000,
     leaseMs:envInt(env, 'MOBILE_LEASE_SECONDS', 120, 30, 600) * 1000,
@@ -238,7 +239,7 @@ export class VMPool {
     const id = roomId(rawId);
     if (!this.starts.has(id) && this.devices.get(id)?.state === 'running') {
       const current = await this.status(id);
-      if (current.device.state === 'running') return current;
+      if (current.device.state === 'running' && current.device.lastError !== 'device_keyboard_timeout') return current;
     }
     if (!this.starts.has(id)) {
       if (this.starts.size >= this.config.maxSlots) throw fail('device_busy', 'Too many mobile devices are being prepared.', 429);
@@ -288,7 +289,10 @@ export class VMPool {
         const end = this.now() + this.config.bootMs;
         let ready = false;
         for (let attempts = 0; attempts < Math.ceil(this.config.bootMs / 1000) && this.now() < end; attempts++) {
-          try {ready = (await this.delegate(device, 'health', {timeoutMs:Math.min(3000, Math.max(1, end - this.now()))}))?.ok === true;} catch { /* Guest networking and broker are still starting. */ }
+          try {
+            const health = await this.delegate(device, 'health', {timeoutMs:Math.min(3000, Math.max(1, end - this.now()))});
+            ready = health?.ok === true && health.runtimeRevision === this.config.expectedGuestRevision;
+          } catch { /* Guest networking and the approved broker revision are still starting. */ }
           if (ready) break;
           if (!await this.runtimeCall('isRunning', device)) {
             device.vmRunning = false;
@@ -297,10 +301,14 @@ export class VMPool {
           await this.pause(1000);
         }
         if (!ready) throw fail('vm_boot_timeout', 'The private mobile VM did not finish starting.');
-        const result = await this.delegate(device, 'wake', {method:'POST', body:{}, timeoutMs:this.config.wakeMs});
+        // Guest readiness owns its boot limit; transport also needs time for
+        // Docker startup and the final running/keyboard-warning response.
+        const result = await this.delegate(device, 'wake', {method:'POST', body:{}, timeoutMs:this.config.wakeMs + 30_000});
         if (result?.device?.roomId !== id || result.device.state !== 'running') throw fail('device_boot_timeout', 'Android did not finish starting.');
         if (this.startingLeases.has(id)) device.leaseExpiresAt = this.startingLeases.get(id);
-        device.state = 'running'; device.lastActiveAt = this.now(); delete device.lastError;
+        device.state = 'running'; device.lastActiveAt = this.now();
+        if (result.device.lastError === 'device_keyboard_timeout') device.lastError = 'device_keyboard_timeout';
+        else delete device.lastError;
         await this.persist();
       } catch (error) {
         await this.exclusive(() => this.stopDevice(device)).catch(() => {});

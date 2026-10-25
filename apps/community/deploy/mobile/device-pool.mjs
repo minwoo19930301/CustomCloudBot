@@ -59,7 +59,7 @@ export function configuration(env = process.env) {
     adbBasePort: envInt(env, 'MOBILE_ADB_BASE_PORT', 16555, 1024, 65000),
     idleMs: envInt(env, 'MOBILE_IDLE_SECONDS', 600, 60, 86400) * 1000,
     leaseMs: envInt(env, 'MOBILE_LEASE_SECONDS', 120, 30, 600) * 1000,
-    bootMs: envInt(env, 'MOBILE_BOOT_SECONDS', 90, 10, 300) * 1000,
+    bootMs: envInt(env, 'MOBILE_BOOT_SECONDS', 90, 10, 600) * 1000,
     memoryMb: envInt(env, 'MOBILE_MEMORY_MB', 3072, 512, 32768),
     cpus: envInt(env, 'MOBILE_CPUS', 2, 1, 16),
     privileged: env.MOBILE_DOCKER_PRIVILEGED === 'true',
@@ -221,28 +221,41 @@ export class DevicePool {
     return this.adb(device, ['shell', args.map(shellQuote).join(' ')], options);
   }
 
-  async connect(device) {
-    await this.run('adb', ['connect', this.serial(device)], { timeout: 8000 });
+  async connect(device, { timeout = 8000 } = {}) {
+    await this.run('adb', ['connect', this.serial(device)], { timeout });
   }
 
   async ready(device) {
     const end = this.now() + this.config.bootMs;
-    let attempts = 0;
+    let attempts = 0, androidReady = false, imeEnabled = false;
+    const failure = () => androidReady
+      ? new MobileError('device_keyboard_timeout', 'Android is running, but its input keyboard is not ready. Try waking the device again to retry keyboard setup.', 503)
+      : new MobileError('device_boot_timeout', 'Android did not finish starting. Try waking the device again.', 503);
+    const timeout = maximum => {
+      const remaining = end - this.now();
+      if (remaining <= 0) throw failure();
+      return Math.min(maximum, remaining);
+    };
     while (this.now() < end && attempts++ < Math.ceil(this.config.bootMs / 1000)) {
       try {
-        await this.connect(device);
-        const boot = await this.shell(device, ['getprop', 'sys.boot_completed'], { timeout: 5000 });
+        await this.connect(device, { timeout: timeout(8000) });
+        const boot = await this.shell(device, ['getprop', 'sys.boot_completed'], { timeout: timeout(5000) });
         if (String(boot).trim() === '1') {
+          androidReady = true;
           if (this.config.inputIme) {
-            await this.shell(device, ['ime', 'enable', this.config.inputIme], { timeout: 5000 });
-            await this.shell(device, ['ime', 'set', this.config.inputIme], { timeout: 5000 });
+            if (!imeEnabled) {
+              await this.shell(device, ['ime', 'enable', this.config.inputIme], { timeout: timeout(30_000) });
+              imeEnabled = true;
+            }
+            await this.shell(device, ['ime', 'set', this.config.inputIme], { timeout: timeout(30_000) });
           }
           return;
         }
-      } catch { /* Android's ADB transport appears before its framework is ready. */ }
-      await this.pause(1000);
+      } catch { /* Android's ADB transport appears before its framework and keyboard are ready. */ }
+      const remaining = end - this.now();
+      if (remaining > 0) await this.pause(Math.min(1000, remaining));
     }
-    throw new MobileError('device_boot_timeout', 'Android did not finish starting. Try waking the device again.', 503);
+    throw failure();
   }
 
   async wake(rawId) {
@@ -276,10 +289,15 @@ export class DevicePool {
         device.state = 'running'; device.lastActiveAt = this.now(); device.lastError = undefined;
         await this.persist();
       } catch (error) {
-        try { await this.run('docker', ['stop', '--time', '10', this.name(device)], { timeout: 20_000 }); } catch { /* Keep an error state and retry reconciliation on the next request. */ }
-        device.state = 'error'; device.lastError = 'device_boot_timeout'; device.leaseExpiresAt = 0;
+        if (error.code === 'device_keyboard_timeout') {
+          // A slow IME must not shut down an Android device that can already display and accept touch.
+          device.state = 'running'; device.lastActiveAt = this.now(); device.lastError = error.code;
+        } else {
+          try { await this.run('docker', ['stop', '--time', '10', this.name(device)], { timeout: 20_000 }); } catch { /* Keep an error state and retry reconciliation on the next request. */ }
+          device.state = 'error'; device.lastError = 'device_boot_timeout'; device.leaseExpiresAt = 0;
+        }
         await this.persist();
-        throw error;
+        if (error.code !== 'device_keyboard_timeout') throw error;
       }
       return this.status(id);
     });
