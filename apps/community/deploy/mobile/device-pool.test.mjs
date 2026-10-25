@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { configuration, DevicePool, parseUiTree } from './device-pool.mjs';
+import { configuration, DevicePool, parseUiTree, roomId } from './device-pool.mjs';
 import { createServer, listenServer } from './service.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
@@ -77,6 +77,22 @@ test('status and leases never allocate a device for ordinary chats', async t => 
   assert.equal(pool.devices.size, 0);
   assert.equal(calls.filter(item => item.file === 'docker').length, 0);
   await assert.rejects(pool.status('../anything'), { code: 'invalid_room' });
+});
+
+test('reserved personal room IDs support wake and sleep while path and control characters stay rejected', async t => {
+  const personal='f6f6cd49-10f4-6102-2f64-da6554d8dba8';
+  const {pool,calls}=await fixture(t);
+  assert.equal(roomId(personal.toUpperCase()),personal);
+  assert.equal(roomId('00000000-0000-0000-0000-000000000000'),'00000000-0000-0000-0000-000000000000');
+  assert.equal((await pool.wake(personal)).device.state,'running');
+  await pool.input(personal,{type:'key',key:'HOME'});
+  assert.equal((await pool.sleep(personal)).device.state,'sleeping');
+  const count=calls.length;
+  for (const id of [personal+'\n',personal+'\r',personal+'/',personal+'%2f',personal.slice(1),personal.replace('-','/'),'../'+personal]) {
+    assert.throws(()=>roomId(id),{code:'invalid_room'});
+    await assert.rejects(pool.wake(id),{code:'invalid_room'});
+  }
+  assert.equal(calls.length,count);
 });
 
 test('each room receives persistent isolated data and only loopback ADB', async t => {

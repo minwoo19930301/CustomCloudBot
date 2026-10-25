@@ -2,7 +2,7 @@ import {spawn} from 'node:child_process';
 import {lstat, mkdir, chmod, chown, readFile, writeFile, rename, rm, statfs} from 'node:fs/promises';
 import path from 'node:path';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const UNIT = id => `customcloudbot-mobile-vm@${id}.service`;
 const fail = () => new Error('The private mobile VM runtime could not complete this operation.');
 const abort = signal => {if (signal?.aborted) throw fail();};
@@ -50,7 +50,7 @@ export function vmRuntimeConfiguration(env = process.env) {
 }
 
 export function validateVMSpec(spec, config) {
-  if (!spec || !UUID.test(spec.roomId || '') || !integer(spec.slot, 0, config.maxSlots - 1) ||
+  if (!spec || typeof spec.roomId !== 'string' || spec.roomId.length !== 36 || !UUID.test(spec.roomId) || !integer(spec.slot, 0, config.maxSlots - 1) ||
       spec.unitName !== UNIT(spec.roomId) || spec.port !== 18091 + spec.slot ||
       spec.dataDir !== path.join(config.dataDir, 'rooms', spec.roomId) || !/^[0-9a-f]{64}$/.test(spec.token || ''))
     throw new Error('Invalid private mobile VM specification');

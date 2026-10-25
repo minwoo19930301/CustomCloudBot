@@ -110,6 +110,17 @@ test('each room has a distinct VM, token and retained slot while inactive VMs ar
   assert.equal((await f.pool.health()).slots,2);
 });
 
+test('personal room UUID-shaped hashes pass through host allocation, guest routes and restart unchanged', async t => {
+  const f=await fixture(t),id='f6f6cd49-10f4-6102-2f64-da6554d8dba8';
+  await ready(f.pool,id);
+  await f.pool.observe(id);await f.pool.input(id,{type:'key',key:'HOME'});await f.pool.sleep(id);
+  assert.ok(f.requests.every(request=>request.path==='/health'||request.path.startsWith(`/devices/${id}`)));
+  assert.ok(f.calls.every(call=>call.unitName===`customcloudbot-mobile-vm@${id}.service`));
+  const restored=new VMPool(f.config,f.dependencies);await restored.initialize();
+  assert.equal((await restored.status(id)).device.state,'sleeping');
+  assert.equal(guestToken(TOKEN,id),guestToken(TOKEN,id.toUpperCase()));
+});
+
 test('leases prevent eviction; expired leases allow replacement and do not erase saved data', async t => {
   const f = await fixture(t);
   await ready(f.pool,A); await f.pool.lease(A,true);

@@ -22,10 +22,25 @@ seed = load('vm-seed')
 launch = load('vm-launch')
 firewall = load('vm-firewall')
 poweroff = load('vm-poweroff')
-ROOM = '11111111-1111-4111-8111-111111111111'
+# Real reserved personal-room ID: hexadecimal shape, non-RFC variant bits.
+ROOM = 'f6f6cd49-10f4-6102-2f64-da6554d8dba8'
 
 
 class SeedTests(unittest.TestCase):
+    def test_legacy_room_shape_preserves_strict_safe_character_and_length_boundary(self):
+        for room in [ROOM, '11111111-1111-4111-8111-111111111111', '00000000-0000-0000-0000-000000000000']:
+            for module in [seed, launch, poweroff]:
+                self.assertIsNotNone(module.UUID.fullmatch(room))
+            docs = seed.seed_documents({'roomId': room, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'})
+            self.assertEqual(json.loads(docs['meta-data'])['instance-id'], 'customcloudbot-mobile-' + room)
+        for room in [ROOM + '\n', ROOM + '\r', ROOM + '/', ROOM + '%2f', ROOM[1:], ROOM.replace('-', '/', 1), '../' + ROOM]:
+            with self.assertRaises(ValueError):
+                seed.seed_documents({'roomId': room, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'})
+            with self.assertRaises(ValueError):
+                launch.launch_args(room, uid=986)
+            with self.assertRaises(ValueError):
+                poweroff.poweroff(room)
+
     def test_private_seed_overrides_only_instance_identity(self):
         token = 'a' * 64
         docs = seed.seed_documents({'roomId': ROOM, 'token': token, 'output': '/unused/seed.iso.tmp'})

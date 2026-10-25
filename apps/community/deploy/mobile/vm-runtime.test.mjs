@@ -81,6 +81,21 @@ test('provision creates one persistent private overlay and keeps credentials out
   assert.equal(await runtime.isRunning(spec), false);
 });
 
+test('legacy personal room shape provisions its exact private unit without weakening path validation', async t => {
+  const {runtime,spec,dataDir,calls}=await fixture(t);
+  const id='f6f6cd49-10f4-6102-2f64-da6554d8dba8';
+  const personal={...spec,roomId:id,unitName:`customcloudbot-mobile-vm@${id}.service`,dataDir:path.join(dataDir,'rooms',id)};
+  await runtime.provision(personal);await runtime.start(personal);
+  assert.equal(await runtime.isRunning(personal),true);
+  await runtime.stop(personal);assert.equal(await runtime.isRunning(personal),false);
+  const count=calls.length;
+  for (const room of [id+'\n',id+'\r',id+'/',id+'%2f',id.slice(1),id.replace('-','/'),'../'+id]) {
+    const invalid={...personal,roomId:room,unitName:`customcloudbot-mobile-vm@${room}.service`,dataDir:path.join(dataDir,'rooms',room)};
+    for (const operation of ['provision','start','stop','isRunning'])await assert.rejects(runtime[operation](invalid),/specification/);
+  }
+  assert.equal(calls.length,count);
+});
+
 test('partial seed failure cannot publish a bootable disk and does not disclose the credential', async t => {
   const {runtime, spec, failSeed} = await fixture(t);
   failSeed();

@@ -4,7 +4,8 @@ import { mkdir, readFile, rename, writeFile, lstat } from 'node:fs/promises';
 import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Personal room IDs preserve this shape but may not have RFC UUID variant bits.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEY_CODES = Object.freeze({ BACK: 4, HOME: 3, APP_SWITCH: 187, ENTER: 66, DEL: 67, TAB: 61, ESCAPE: 111, DPAD_UP: 19, DPAD_DOWN: 20, DPAD_LEFT: 21, DPAD_RIGHT: 22 });
 const OWNER_LABEL = 'org.customcloudbot.mobile';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -16,7 +17,7 @@ export class MobileError extends Error {
 }
 
 export function roomId(value) {
-  if (typeof value !== 'string' || !UUID.test(value)) throw new MobileError('invalid_room', 'A valid room UUID is required.');
+  if (typeof value !== 'string' || value.length !== 36 || !UUID.test(value)) throw new MobileError('invalid_room', 'A valid room UUID is required.');
   return value.toLowerCase();
 }
 

@@ -42,14 +42,20 @@ broker token, and socket permissions.
 
 Use the verified Oracle Linux AppStream QEMU package set. On the inspected OL9
 host, `/usr/libexec/qemu-kvm` from `qemu-kvm-core-10.1.0-17.el9_8.5.aarch64`
-provides TCG. `/usr/bin/qemu-img`, Python 3, Node, nftables, and systemd are also
+provides TCG. `/usr/bin/qemu-img`, Python 3.12 for the seed builder, Node.js 24 for
+the host broker, nftables, and systemd are also
 required. The installer must first inspect the DNF transaction; no kernel,
 libvirt, or existing package replacement is required for this deployment.
 
-Create an isolated root-owned Python environment for the small CIDATA builder:
+The host's default `/usr/bin/python3` is Python 3.9. It can run the standard-library
+launcher/shutdown helpers, but it cannot install the pinned pycdlib release.
+Install Oracle's `python3.12` and `python3.12-pip` alongside the system Python,
+after reviewing the package transaction. Do not change `/usr/bin/python3` or
+upgrade the system Python in place. Create an isolated root-owned environment
+for the small CIDATA builder:
 
 ```sh
-python3 -m venv /opt/customcloudbot-mobile/seed-venv
+python3.12 -m venv /opt/customcloudbot-mobile/seed-venv
 /opt/customcloudbot-mobile/seed-venv/bin/python -m pip install 'pycdlib==1.22.0'
 ```
 
@@ -59,6 +65,51 @@ come only from the host pool's HMAC-derived room token, not client-supplied
 commands or paths. `MOBILE_VM_SEED_PYTHON` and `MOBILE_VM_SEED_SCRIPT` may point to
 administrator-installed root-owned equivalents. Do not allow untrusted accounts
 to change those settings or code files.
+
+## Initial setup evidence (2026-10-25)
+
+Read-only inspection of the existing OCI host confirmed the following setup:
+
+| Component | Observed value |
+| --- | --- |
+| Host | Oracle Linux 9 ARM64, existing UEK `6.12.0-204.92.4.3.1.el9uek.aarch64`, 4 KiB pages |
+| Host JavaScript | `/usr/bin/node` v24.20.0 |
+| System Python | `/usr/bin/python3` 3.9.25, retained unchanged |
+| Seed environment | `/opt/customcloudbot-mobile/seed-venv/bin/python` 3.12.15 |
+| Data root and base | root:ccb-mobile-vm (UID 0 / GID 986), 0750 |
+| Host broker unit | `User=root`, `Group=opc`, loopback-only network allowance |
+| Configured saved / running devices | 10 / 1 |
+| Configured VM / Android boot deadlines | 300 seconds / 300 seconds |
+| Configured broker request deadline | 30 seconds |
+
+The Python 3.12 dependency transaction added six packages without upgrading
+existing packages. The broker was still inactive and `/run/community-mobile`
+had not been created at this inspection. These facts confirm initial setup,
+not a successful Android session on OCI.
+
+The Linux guest base is Ubuntu 24.04 Noble ARM64. The separate local TCG proof
+booted kernel `6.8.0-147-generic` with its matching `linux-modules-extra`, Docker,
+ADB, and the pinned Android image; see [ANDROID-IMAGE.md](ANDROID-IMAGE.md) for
+the exact image and measured proof. The OCI golden preparation installed Ubuntu
+Node.js 18.19 for the small dependency-free guest broker. That guest parser check
+does not replace a complete Android boot test, and Node 18 is not the host app's
+runtime. The host broker and app use Node 24.
+
+`Group=opc` is only for the app-facing socket. Since the controller's effective
+UID is root, it can traverse and provision the existing root:ccb-mobile-vm data
+tree without changing that tree's group to `opc`. The systemd RuntimeDirectory
+is root:opc 0750; `listenServer` makes its socket 0660. The app container must
+receive the directory bind and its actual host-mapped group. Do not add the app
+to the VM group or grant it access to room seeds/disks. The installer must create
+the data root with the VM group before first startup; otherwise a newly created
+root:opc parent would prevent QEMU from traversing it.
+
+The configuration file deliberately sets `MOBILE_VM_BOOT_SECONDS=300`, overriding
+the code's 180-second default. Both guest boot and Android readiness happen in
+the background; the private wake HTTP response is prompt and reports `starting`.
+Status must become `running` only after the room-specific guest reports a real
+Android boot. Keep the data root, launcher's fixed `BASE`, systemd bind paths,
+and pool environment aligned when moving this installation.
 
 ## Golden guest requirements
 

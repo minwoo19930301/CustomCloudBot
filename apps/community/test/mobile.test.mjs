@@ -131,6 +131,16 @@ test("each request uses current private credentials and scope is fixed by truste
   assert.equal(f.requests.length, before);
 });
 
+test("reserved personal room hashes retain their exact mobile route and reject malformed IDs", async t => {
+  const f=await fixture(t),id='f6f6cd49-10f4-6102-2f64-da6554d8dba8';
+  await f.hub.status(id.toUpperCase());await f.hub.wake(id);await f.hub.input(id,{type:'key',key:'HOME'});
+  assert.deepEqual(f.requests.map(request=>request.url),[`/devices/${id}`,`/devices/${id}/wake`,`/devices/${id}/input`]);
+  const count=f.requests.length;
+  for(const invalid of [id+'\n',id+'\r',id+'/',id+'%2f',id.slice(1),id.replace('-','/'),'../'+id])
+    assert.throws(()=>f.hub.status(invalid),error=>error.code==='MOBILE_ROOM_INVALID');
+  assert.equal(f.requests.length,count);
+});
+
 test("input validates coordinates, durations, keys, text and rejects arbitrary execution", () => {
   for (const input of [null, [], { type: "shell", command: "id" }, { type: "tap", x: -1, y: 1 }, { type: "tap", x: 0, y: 8192 }, { type: "tap", x: NaN, y: 1 }, { type: "tap", x: "1", y: 2 }, { type: "tap", x: 1.5, y: 2 }, { type: "swipe", x1: 1, y1: 2, x2: 3, y2: 4, duration: 99 }, { type: "swipe", x1: 1, y1: 2, x2: 3, y2: 4, duration: 3001 }, { type: "key", key: "HOME; reboot" }, { type: "text", text: "line\nnext" }, { type: "text", text: "x".repeat(2001) }, { type: "text", text: 12 }, { type: "text", text: "hello", roomId: OTHER }]) assert.throws(() => validateMobileInput(input), error => error.status === 400);
   assert.deepEqual(validateMobileInput({ type: "text", text: "안녕하세요 🙂" }), { type: "text", text: "안녕하세요 🙂" });
