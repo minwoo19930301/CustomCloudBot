@@ -92,6 +92,7 @@ const BROKER_ERRORS = {
   device_busy: "This mobile device is working and cannot sleep yet",
   vm_boot_timeout: "The mobile VM did not finish starting; retry after checking its runtime",
   device_boot_timeout: "Android did not finish starting; retry after checking its runtime",
+  device_keyboard_timeout: "Android is running, but its keyboard is not ready; reconnect the keyboard in the mobile workspace",
   vm_start_failed: "The mobile VM could not start; check the private runtime",
   vm_stop_failed: "The previous mobile VM has not stopped yet; try again shortly",
   vm_recovery_required: "The mobile runtime restarted; wake this device again",

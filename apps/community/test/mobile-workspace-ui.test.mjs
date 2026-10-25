@@ -86,15 +86,15 @@ test('remote keyboard arrows and enter are sent once, and deactivation clears pr
   assert.equal(input.value,'\u200b');assert.equal(input.disabled,true);keyboard.destroy();
 });
 
-async function fixture(t,{readOnly=false,running=true,send=async()=>{},fetchFrame=null,draft,initialMessages}={}){
+async function fixture(t,{readOnly=false,running=true,lastError,onStatus,send=async()=>{},fetchFrame=null,draft,initialMessages}={}){
   const {document,mount}=dom(),requests=[],messages=initialMessages||[{id:'m1',role:'user',content:'이 모바일의 설정을 열어줘.'}];
   const originalFetch=globalThis.fetch;globalThis.fetch=fetchFrame||(async()=>new Response(new Uint8Array([1,2,3]),{headers:{'content-type':'image/png'}}));
   t.after(()=>{globalThis.fetch=originalFetch;view.destroy();});
-  const api=async(path,options={})=>{requests.push({path,options});if(path.endsWith('/observe'))return {width:720,height:1560,nodes:[{editable:true,enabled:true,bounds:{left:0,top:0,right:200,bottom:200}}]};if(path.endsWith('/input'))return {ok:true};return {device:{state:running?'running':'sleeping'},capacity:{running:running?1:0,maxRunning:2},readOnly};};
+  const api=async(path,options={})=>{requests.push({path,options});if(path.endsWith('/observe'))return {width:720,height:1560,nodes:[{editable:true,enabled:true,bounds:{left:0,top:0,right:200,bottom:200}}]};if(path.endsWith('/input'))return {ok:true};return {device:{state:running?'running':'sleeping',lastError},capacity:{running:running?1:0,maxRunning:2},readOnly};};
   const loads=[],sends=[];
-  const view=createMobileWorkspace({mount,api,roomId:'room-A',draft,mobileChat:{load:async(roomId)=>{loads.push(roomId);return {messages,readOnly};},send:async(roomId,text)=>{sends.push({roomId,text});await send();messages.push({id:'m2',role:'user',content:text});}}});
+  const view=createMobileWorkspace({mount,api,roomId:'room-A',draft,onStatus,mobileChat:{load:async(roomId)=>{loads.push(roomId);return {messages,readOnly};},send:async(roomId,text)=>{sends.push({roomId,text});await send();messages.push({id:'m2',role:'user',content:text});}}});
   await flush();await flush();
-  return {view,document,mount,requests,loads,sends,input:find(mount,'mobile-chat-input'),form:find(mount,'mobile-chat-form'),image:find(mount,'mobile-screen-image')};
+  return {view,document,mount,requests,loads,sends,setLastError:value=>{lastError=value;},input:find(mount,'mobile-chat-input'),form:find(mount,'mobile-chat-form'),image:find(mount,'mobile-screen-image')};
 }
 
 test('mobile chat sends through the existing room callback and updates the same room transcript',async t=>{
@@ -118,6 +118,33 @@ test('touch sends a tap before synchronously opening the iPhone keyboard; cancel
   assert.deepEqual(JSON.parse(f.requests.find(request=>request.path.endsWith('/input')).options.body),{type:'tap',x:20,y:20});
   f.image.fire('pointerdown',{clientX:30,clientY:30});f.image.fire('pointercancel',{clientX:30,clientY:30});await flush();
   assert.equal(f.requests.filter(request=>request.path.endsWith('/input')).length,1);
+});
+
+test('keyboard warnings keep the decoded screen and touch usable, survive frame loads and allow explicit reconnect',async t=>{
+  const statuses=[],f=await fixture(t,{lastError:'device_keyboard_timeout',onStatus:(message,kind)=>statuses.push({message,kind})});
+  const reconnect=buttonBy(f.mount,'키보드 다시 연결');
+  assert.equal(reconnect.textContent,'키보드 다시 연결');assert.equal(reconnect.disabled,false);
+  assert.equal(statuses.at(-1).kind,'warning');assert.match(statuses.at(-1).message,/키보드 연결이 지연/);
+  assert.equal(f.requests.some(request=>request.path.endsWith('/wake')),false,'a warning must not trigger an automatic retry loop');
+  f.image.naturalWidth=720;f.image.naturalHeight=1560;f.image.fire('load');
+  assert.equal(f.image.hidden,false);assert.equal(find(f.mount,'mobile-screen-message').hidden,true);
+  assert.equal(buttonBy(f.mount,'모바일 화면 확대').disabled,false);assert.equal(buttonBy(f.mount,'Android 홈').disabled,false);
+  assert.equal(statuses.at(-1).kind,'warning','a new screenshot cannot hide a persistent keyboard warning');
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  buttonBy(f.mount,'Android 홈').onclick();await flush();
+  assert.equal(f.requests.filter(request=>request.path.endsWith('/input')).length,2);
+  f.setLastError(undefined);reconnect.onclick();await flush();await flush();
+  assert.equal(f.requests.filter(request=>request.path.endsWith('/wake')).length,1);
+  assert.equal(buttonBy(f.mount,'모바일 깨우기').disabled,true,'normal running state restores the existing disabled wake control');
+  assert.equal(f.image.hidden,false);assert.deepEqual(statuses.at(-1),{message:'Android 연결됨',kind:'ready'});
+});
+
+test('readonly keyboard warnings retain the screen but cannot reconnect or control the device',async t=>{
+  const f=await fixture(t,{readOnly:true,lastError:'device_keyboard_timeout'});
+  const reconnect=buttonBy(f.mount,'키보드 다시 연결');assert.equal(reconnect.disabled,true);
+  f.image.naturalWidth=720;f.image.naturalHeight=1560;f.image.fire('load');assert.equal(f.image.hidden,false);
+  reconnect.onclick();buttonBy(f.mount,'Android 홈').onclick();await flush();
+  assert.ok(f.requests.every(request=>!request.path.endsWith('/wake')&&!request.path.endsWith('/input')));
 });
 
 test('failed AI sending preserves the user draft',async t=>{
