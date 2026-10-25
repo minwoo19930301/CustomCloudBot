@@ -86,7 +86,7 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
   const chatState=node(document,'div','','mobile-chat-state');chatState.setAttribute('role','status');
   const form=node(document,'form',undefined,'mobile-chat-form'),input=node(document,'textarea',undefined,'mobile-chat-input'),submit=button(document,'이 대화의 AI에게 보내기','↑');submit.type='submit';input.rows=2;input.maxLength=12000;input.value=draft.value||'';input.placeholder='이 모바일에서 무엇을 할까요?';input.setAttribute('aria-label','이 대화의 AI에게 요청');form.append(input,submit);
   scroller.append(screen,navigation,transcript);root.append(toolbar,scroller,chatState,form);mount.replaceChildren(root);
-  let disposed=false,running=false,deviceWarning='',frameReady=false,readOnly=false,sending=false,operating=false,chatReady=false,width=720,height=1560,frameUrl=null,frameBytes=null,lastFrameAt=0,regions=[],aiBusy=false,screenBusy=false,screenAbort=null,statusBusy=false,chatBusy=false,screenEpoch=0,regionRevision=0,statusReady=false,connectionUnavailable=false,deviceState='unallocated',initialWakeAttempted=false,pointer=null,wheelAt=0,expanded=false,inputQueue=Promise.resolve(),chatVersion='',draftRevision=draft.revision||0;
+  let disposed=false,running=false,deviceWarning='',frameReady=false,readOnly=false,sending=false,operating=false,chatReady=false,width=720,height=1560,frameUrl=null,regions=[],regionsObservedAt=null,aiBusy=false,screenBusy=false,screenAbort=null,statusBusy=false,chatBusy=false,screenEpoch=0,regionRevision=0,statusReady=false,connectionUnavailable=false,deviceState='unallocated',initialWakeAttempted=false,pointer=null,wheelAt=0,expanded=false,pendingInputs=0,inputQueue=Promise.resolve(),chatVersion='',draftRevision=draft.revision||0;
   const timers=new Map(),listeners=[];
   const active=()=>!disposed&&!abort.signal.aborted&&!document.hidden;
   const schedule=(fn,delay)=>{if(!active())return;clearTimeout(timers.get(fn));const timer=setTimeout(()=>{timers.delete(fn);if(active())void fn();},delay);timers.set(fn,timer);};
@@ -97,43 +97,43 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
   const preparing=()=>['starting','booting'].includes(deviceState);
   const recoveryLabel=()=>({device_display_timeout:'화면 다시 켜기',device_keyboard_timeout:'키보드 다시 연결'}[deviceWarning]||'');
   const refreshControls=()=>{expand.disabled=!running||!frameReady;wake.textContent=recoveryLabel()||'깨우기';wake.setAttribute('aria-label',recoveryLabel()||'모바일 깨우기');wake.disabled=!active()||connectionUnavailable||operating||preparing()||(running&&!deviceWarning)||readOnly;sleep.disabled=!active()||connectionUnavailable||operating||!running||readOnly;for(const control of [back,home,recent])control.disabled=!active()||!running||operating||readOnly;input.readOnly=readOnly;input.disabled=!mobileChat?.send||!chatReady;submit.disabled=!mobileChat?.send||!chatReady||readOnly||sending||draft.pending||!input.value.trim();image.setAttribute('aria-disabled',String(!running||readOnly));};
-  const invalidateRegions=()=>{regions=[];regionRevision++;};
+  const invalidateRegions=()=>{regions=[];regionsObservedAt=null;regionRevision++;};
+  const updateDimensions=(nextWidth,nextHeight)=>{const w=Number.isFinite(nextWidth)&&nextWidth>0?nextWidth:width,h=Number.isFinite(nextHeight)&&nextHeight>0?nextHeight:height;if(w!==width||h!==height)invalidateRegions();width=w;height=h;};
   const tryAutoWake=()=>{if(!active()||!statusReady||!chatReady||readOnly||initialWakeAttempted)return;initialWakeAttempted=true;if(['sleeping','stopped','unallocated','unassigned'].includes(deviceState))void power('wake');};
   const sendAction=action=>{
     if(!action||!active()||!running||readOnly||operating)return Promise.resolve();
-    const epoch=screenEpoch;invalidateRegions();
-    inputQueue=inputQueue.then(async()=>{if(!active()||!running||readOnly||epoch!==screenEpoch)return;await api(base+'/input',{method:'POST',body:JSON.stringify(action),signal:abort.signal});}).catch(error);
+    const epoch=screenEpoch;invalidateRegions();pendingInputs++;screenAbort?.abort();clearTimeout(timers.get(pollScreen));timers.delete(pollScreen);
+    inputQueue=inputQueue.then(async()=>{if(!active()||!running||readOnly||epoch!==screenEpoch)return;await api(base+'/input',{method:'POST',body:JSON.stringify(action),signal:abort.signal});}).catch(error).finally(()=>{pendingInputs--;if(!pendingInputs&&active()&&running&&!operating)requestScreen();});
     return inputQueue;
   };
   const keyboard=createMobileKeyboard({viewport:screen,send:sendAction,canInput:()=>active()&&running&&!readOnly&&!operating,onChange:onKeyboard});
-  const revokeFrame=()=>{if(frameUrl)URL.revokeObjectURL(frameUrl);frameUrl=null;frameBytes=null;lastFrameAt=0;frameReady=false;image.removeAttribute('src');image.hidden=true;};
+  const revokeFrame=()=>{if(frameUrl)URL.revokeObjectURL(frameUrl);frameUrl=null;frameReady=false;image.removeAttribute('src');image.hidden=true;};
   async function frame(readSignal,epoch) {
-    try{const blob=await screenshotBlob(base+'/screenshot',readSignal),bytes=new Uint8Array(await blob.arrayBuffer());if(readSignal.aborted||!active()||!running||epoch!==screenEpoch)return false;
-      // Compare bounded image bytes: stable frames keep their editable map, while
-      // any screen change invalidates it before the next Android UI-tree read.
-      if(!frameBytes||frameBytes.length!==bytes.length||!frameBytes.every((value,index)=>value===bytes[index]))invalidateRegions();
-      frameBytes=bytes;lastFrameAt=Date.now();const next=URL.createObjectURL(blob),previous=frameUrl;frameUrl=next;image.src=next;if(previous)URL.revokeObjectURL(previous);return true;}
+    try{const blob=await screenshotBlob(base+'/screenshot',readSignal);if(readSignal.aborted||!active()||!running||epoch!==screenEpoch)return false;
+      // Clock/cursor animations do not invalidate semantic input bounds. Known
+      // mutations, geometry changes and a short observation lifetime do instead.
+      const next=URL.createObjectURL(blob),previous=frameUrl;frameUrl=next;image.src=next;if(previous)URL.revokeObjectURL(previous);return true;}
     catch(cause){if(!readSignal.aborted&&active()&&epoch===screenEpoch){if(!frameReady){screenMessage.hidden=false;screenMessage.textContent=errorMessage(cause);}error(cause);}return false;}
   }
   async function observe(readSignal,epoch) {
     const revision=regionRevision;
-    try{const data=await api(base+'/observe',{signal:readSignal});if(readSignal.aborted||!active()||!running||epoch!==screenEpoch||revision!==regionRevision)return;if(Number.isFinite(data.width)&&data.width>0)width=data.width;if(Number.isFinite(data.height)&&data.height>0)height=data.height;regions=mobileEditableRegions(data);}
-    catch{if(epoch===screenEpoch)invalidateRegions();}
+    try{const data=await api(base+'/observe',{signal:readSignal});if(readSignal.aborted||!active()||!running||epoch!==screenEpoch||revision!==regionRevision)return;updateDimensions(data.width,data.height);regions=mobileEditableRegions(data);regionsObservedAt=Date.now();}
+    catch{if(!readSignal.aborted&&epoch===screenEpoch&&revision===regionRevision)invalidateRegions();}
   }
   // The Android broker serializes device operations. One completion-driven loop
   // avoids queuing a second expensive screen read while the first is still busy.
   async function pollScreen() {
-    if(screenBusy||!active()||!running||operating)return;
+    if(screenBusy||pendingInputs||!active()||!running||operating)return;
     clearTimeout(timers.get(pollScreen));timers.delete(pollScreen);
     screenBusy=true;const controller=new AbortController(),epoch=screenEpoch;screenAbort=controller;
     const cancel=()=>controller.abort();abort.signal.addEventListener('abort',cancel,{once:true});
     try{if(await frame(controller.signal,epoch)&&!controller.signal.aborted&&active()&&running&&!operating&&!aiBusy&&epoch===screenEpoch)await observe(controller.signal,epoch);}
-    finally{abort.signal.removeEventListener('abort',cancel);screenBusy=false;if(screenAbort===controller)screenAbort=null;if(active()&&running&&!operating)schedule(pollScreen,aiBusy?3000:1000);}
+    finally{abort.signal.removeEventListener('abort',cancel);screenBusy=false;if(screenAbort===controller)screenAbort=null;if(active()&&running&&!operating&&!pendingInputs)schedule(pollScreen,aiBusy?3000:1000);}
   }
   const requestScreen=()=>{if(!screenBusy&&!timers.has(pollScreen))void pollScreen();};
   function applyStatus(data) {
     const device=data.device||data,state=device.state||device.status||'unassigned';running=state==='running';deviceWarning=running&&['device_keyboard_timeout','device_display_timeout'].includes(device.lastError)?device.lastError:'';deviceState=state;statusReady=true;
-    readOnly=Boolean(data.readOnly??readOnly);if(device.width>0)width=device.width;if(device.height>0)height=device.height;
+    if(Boolean(data.readOnly??readOnly)!==readOnly)invalidateRegions();readOnly=Boolean(data.readOnly??readOnly);updateDimensions(device.width,device.height);
     const counts=data.capacity||data;capacity.textContent=Number.isFinite(counts.running)?`${counts.running} / ${counts.maxRunning||2} 실행 중`:'';
     deviceLabel.textContent=device.name||'Android';root.dataset.state=state;
     const startingMessage='이 대화의 Android를 준비하는 중… 처음에는 몇 분 걸릴 수 있습니다.';
@@ -156,10 +156,10 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
   const point=event=>mobileFramePoint(image.getBoundingClientRect(),width,height,event.clientX,event.clientY);
   listen(image,'pointerdown',event=>{if(event.button!==0||!running||readOnly||operating||!active()||pointer)return;const start=point(event);if(!start)return;event.preventDefault();keyboard.flush();pointer={id:event.pointerId,start,last:start,time:Date.now(),clientX:event.clientX,clientY:event.clientY,moved:false};image.setPointerCapture?.(event.pointerId);});
   listen(image,'pointermove',event=>{if(!pointer||pointer.id!==event.pointerId)return;pointer.moved||=Math.hypot(event.clientX-pointer.clientX,event.clientY-pointer.clientY)>8;pointer.last=point(event)||pointer.last;if(pointer.moved)invalidateRegions();});
-  const endPointer=(event,cancelled=false)=>{if(!pointer||pointer.id!==event.pointerId)return;const gesture=pointer;pointer=null;try{image.releasePointerCapture?.(event.pointerId);}catch{}const action=mobileGesture(gesture.start,point(event)||gesture.last,{elapsed:Date.now()-gesture.time,moved:gesture.moved,cancelled});const editable=action?.type==='tap'&&Date.now()-lastFrameAt<30000?mobileEditableAt(gesture.start,regions):null;if(action)void sendAction(action);if(editable)keyboard.focus(editable);else keyboard.deactivate();};
+  const endPointer=(event,cancelled=false)=>{if(!pointer||pointer.id!==event.pointerId)return;const gesture=pointer;pointer=null;try{image.releasePointerCapture?.(event.pointerId);}catch{}const action=mobileGesture(gesture.start,point(event)||gesture.last,{elapsed:Date.now()-gesture.time,moved:gesture.moved,cancelled});const editable=action?.type==='tap'&&regionsObservedAt!==null&&Date.now()-regionsObservedAt<30000?mobileEditableAt(gesture.start,regions):null;if(action)void sendAction(action);if(editable)keyboard.focus(editable);else keyboard.deactivate();};
   listen(image,'pointerup',event=>endPointer(event));listen(image,'pointercancel',event=>endPointer(event,true));listen(image,'lostpointercapture',()=>{pointer=null;});
   listen(image,'wheel',event=>{const target=point(event);if(!target||!running||readOnly||!active())return;event.preventDefault();keyboard.deactivate();if(Date.now()-wheelAt<250)return;wheelAt=Date.now();void sendAction(mobileWheel(target,event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?height:1),width,height));},{passive:false});
-  listen(image,'contextmenu',event=>event.preventDefault());listen(image,'load',()=>{if(active()&&running&&frameUrl&&image.naturalWidth>0&&image.naturalHeight>0){width=image.naturalWidth;height=image.naturalHeight;frameReady=true;image.hidden=false;screenMessage.hidden=true;onStatus(deviceWarning?errorMessage({code:deviceWarning}):'Android 연결됨',deviceWarning?'warning':'ready');refreshControls();}});
+  listen(image,'contextmenu',event=>event.preventDefault());listen(image,'load',()=>{if(active()&&running&&frameUrl&&image.naturalWidth>0&&image.naturalHeight>0){updateDimensions(image.naturalWidth,image.naturalHeight);frameReady=true;image.hidden=false;screenMessage.hidden=true;onStatus(deviceWarning?errorMessage({code:deviceWarning}):'Android 연결됨',deviceWarning?'warning':'ready');refreshControls();}});
   listen(image,'error',()=>{if(!active()||!running)return;frameReady=false;image.hidden=true;screenMessage.hidden=false;screenMessage.textContent='모바일 화면을 불러오지 못했습니다. 다시 연결하고 있습니다.';onStatus(screenMessage.textContent,'error');refreshControls();});
   back.onclick=()=>void sendAction({type:'key',key:'BACK'});home.onclick=()=>void sendAction({type:'key',key:'HOME'});recent.onclick=()=>void sendAction({type:'key',key:'APP_SWITCH'});
   wake.onclick=()=>void power('wake');sleep.onclick=()=>void power('sleep');expand.onclick=()=>{expanded=!expanded;root.classList.toggle('is-expanded',expanded);expand.textContent=expanded?'축소':'확대';expand.setAttribute('aria-label',expanded?'모바일 화면 축소':'모바일 화면 확대');onExpand(expanded);};
@@ -168,7 +168,7 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
   const saveDraft=()=>{draft.value=input.value;draft.revision=(draft.revision||0)+1;draftRevision=draft.revision;refreshControls();};
   async function chat() {
     if(chatBusy||!active()||!mobileChat?.load)return;chatBusy=true;
-    try{const data=await mobileChat.load(roomId,{signal:abort.signal});if(!active())return;syncDraft();chatReady=true;readOnly=!!data.readOnly;if(Boolean(data.busy)!==aiBusy){aiBusy=Boolean(data.busy);invalidateRegions();}const messages=(Array.isArray(data.messages)?data.messages:[]).slice(-50),version=JSON.stringify(messages);
+    try{const data=await mobileChat.load(roomId,{signal:abort.signal});if(!active())return;syncDraft();chatReady=true;if(!!data.readOnly!==readOnly)invalidateRegions();readOnly=!!data.readOnly;if(Boolean(data.busy)!==aiBusy){aiBusy=Boolean(data.busy);invalidateRegions();}const messages=(Array.isArray(data.messages)?data.messages:[]).slice(-50),version=JSON.stringify(messages);
       if(version!==chatVersion){const stick=chatVersion!==''&&scroller.scrollHeight-scroller.clientHeight-scroller.scrollTop<60;chatVersion=version;transcript.replaceChildren();for(const message of messages){const content=typeof message.content==='string'?message.content:typeof message.text==='string'?message.text:'';if(!content)continue;const row=node(document,'div',undefined,'mobile-chat-message');const role=message.role||(message.kind==='human'?'user':message.kind==='bot'?'assistant':'system');row.dataset.role=role;const author=node(document,'small',message.authorName||message.author||(role==='user'?'나':role==='assistant'?'AI':'알림')),text=node(document,'p',content);row.append(author,text);transcript.append(row);}if(stick)scroller.scrollTop=scroller.scrollHeight;}
       chatState.textContent=readOnly?'가지치기한 원본입니다. 새 가지에서 요청해주세요.':data.busy?'AI가 작업 중입니다. 추가 요청은 같은 대화에 이어집니다.':'';if(readOnly)keyboard.deactivate();refreshControls();tryAutoWake();
     }catch(cause){if(active())chatState.textContent=errorMessage(cause);}finally{chatBusy=false;if(active())schedule(chat,2500);}

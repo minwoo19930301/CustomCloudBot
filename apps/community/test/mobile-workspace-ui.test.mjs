@@ -86,11 +86,11 @@ test('remote keyboard arrows and enter are sent once, and deactivation clears pr
   assert.equal(input.value,'\u200b');assert.equal(input.disabled,true);keyboard.destroy();
 });
 
-async function fixture(t,{readOnly=false,running=true,busy=false,lastError,onStatus,send=async()=>{},fetchFrame=null,observe=null,draft,initialMessages}={}){
+async function fixture(t,{readOnly=false,running=true,busy=false,lastError,onStatus,send=async()=>{},fetchFrame=null,observe=null,sendInput=null,draft,initialMessages}={}){
   const {document,mount}=dom(),requests=[],messages=initialMessages||[{id:'m1',role:'user',content:'이 모바일의 설정을 열어줘.'}];
   const originalFetch=globalThis.fetch;globalThis.fetch=fetchFrame||(async()=>new Response(new Uint8Array([1,2,3]),{headers:{'content-type':'image/png'}}));
   t.after(()=>{globalThis.fetch=originalFetch;view.destroy();});
-  const api=async(path,options={})=>{requests.push({path,options});if(path.endsWith('/observe'))return observe?observe(options):{width:720,height:1560,nodes:[{editable:true,enabled:true,bounds:{left:0,top:0,right:200,bottom:200}}]};if(path.endsWith('/input'))return {ok:true};return {device:{state:running?'running':'sleeping',lastError},capacity:{running:running?1:0,maxRunning:2},readOnly};};
+  const api=async(path,options={})=>{requests.push({path,options});if(path.endsWith('/observe'))return observe?observe(options):{width:720,height:1560,nodes:[{editable:true,enabled:true,bounds:{left:0,top:0,right:200,bottom:200}}]};if(path.endsWith('/input'))return sendInput?sendInput(options):{ok:true};return {device:{state:running?'running':'sleeping',lastError},capacity:{running:running?1:0,maxRunning:2},readOnly};};
   const loads=[],sends=[];
   const view=createMobileWorkspace({mount,api,roomId:'room-A',draft,onStatus,mobileChat:{load:async(roomId)=>{loads.push(roomId);return {messages,readOnly,busy};},send:async(roomId,text)=>{sends.push({roomId,text});await send();messages.push({id:'m2',role:'user',content:text});}}});
   await flush();await flush();
@@ -206,17 +206,64 @@ test('hiding during an editable-region read aborts that read before polling resu
   assert.equal(frames,2);assert.equal(reads.length,2);reads[1].resolve({width:720,height:1560,nodes:[]});await flush();
 });
 
-for(const changed of [false,true])test(`slow editable reads ${changed?'invalidate a changed frame':'retain a stable frame map beyond 2.5 seconds'}`,async t=>{
+for(const changed of [false,true])test(`slow editable reads ${changed?'retain editable bounds across cursor or clock animation':'retain a stable frame map beyond 2.5 seconds'}`,async t=>{
   t.mock.timers.enable({apis:['setTimeout','Date']});
   let frames=0,reads=0,finishObserve;
   const f=await fixture(t,{fetchFrame:async()=>new Response(new Uint8Array([changed?++frames:1]),{headers:{'content-type':'image/png'}}),observe:()=>++reads===1?{width:720,height:1560,nodes:[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]}:new Promise(resolve=>{finishObserve=resolve;})});
   t.mock.timers.tick(10000);await flush();assert.equal(reads,2);
   f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
-  assert.equal(f.document.activeElement===find(f.mount,'mobile-native-keyboard'),!changed);
+  assert.equal(f.document.activeElement,find(f.mount,'mobile-native-keyboard'));
   finishObserve({width:720,height:1560,nodes:[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]});await flush();
   buttonBy(f.mount,'Android 홈').onclick();await flush();
   f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
   assert.equal(f.document.activeElement,null,'direct input invalidates the old map and late reads cannot restore it');
+});
+
+test('a newly observed editable field remains usable after a 45-second Android read',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date']});let finishObserve;
+  const f=await fixture(t,{observe:()=>new Promise(resolve=>{finishObserve=resolve;})});
+  t.mock.timers.tick(45000);await flush();
+  finishObserve({width:720,height:1560,nodes:[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]});await flush();
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement,find(f.mount,'mobile-native-keyboard'),'validity starts when the UI tree is received, not when its earlier screenshot was captured');
+});
+
+test('fresh screenshots cannot renew an old editable map while its replacement is still pending',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date']});let reads=0,frames=0;
+  const f=await fixture(t,{fetchFrame:async()=>{frames++;return new Response(new Uint8Array([frames]),{headers:{'content-type':'image/png'}});},observe:()=>++reads===1?{width:720,height:1560,nodes:[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]}:new Promise(()=>{})});
+  t.mock.timers.tick(29000);await flush();assert.equal(frames,2);
+  t.mock.timers.tick(2000);await flush();
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement,null,'the recent screenshot does not refresh the 31-second-old tree');
+});
+
+test('the latest UI tree removes obsolete editable bounds even when the screenshot is unchanged',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date']});let reads=0;
+  const f=await fixture(t,{observe:()=>({width:720,height:1560,nodes:++reads===1?[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]:[]})});
+  t.mock.timers.tick(1000);await flush();assert.equal(reads,2);
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement,null);
+});
+
+test('a decoded geometry change invalidates editable bounds from the previous screen size',async t=>{
+  const f=await fixture(t);f.image.naturalWidth=1080;f.image.naturalHeight=2340;f.image.fire('load');
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement,null);
+});
+
+test('manual input cancels a slow observe and all queued gestures finish before screen polling resumes',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});const reads=[],inputs=[],statuses=[];let frames=0;
+  const f=await fixture(t,{onStatus:(message,kind)=>statuses.push({message,kind}),fetchFrame:async()=>{frames++;return new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}});},observe:({signal})=>new Promise((resolve,reject)=>{
+    reads.push({signal,resolve});signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true});
+  }),sendInput:options=>new Promise(resolve=>inputs.push({action:JSON.parse(options.body),resolve}))});
+  assert.equal(reads.length,1);
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});buttonBy(f.mount,'Android 홈').onclick();await flush();
+  assert.equal(reads[0].signal.aborted,true);assert.deepEqual(inputs.map(item=>item.action),[{type:'tap',x:20,y:20}]);
+  t.mock.timers.tick(10000);await flush();assert.equal(frames,1,'status polls must not interleave a new screen read with queued input');
+  inputs[0].resolve({ok:true});await flush();assert.equal(frames,1);assert.equal(inputs[1].action.key,'HOME');
+  inputs[1].resolve({ok:true});await flush();assert.equal(frames,2);assert.equal(reads.length,2);
+  assert.ok(statuses.every(status=>status.kind!=='error'),'preempting a background observation is silent');
+  reads[1].resolve({width:720,height:1560,nodes:[]});await flush();
 });
 
 test('a stalled screen cannot keep an editable map usable indefinitely',async t=>{
