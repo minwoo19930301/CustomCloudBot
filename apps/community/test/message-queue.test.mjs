@@ -323,3 +323,60 @@ test('restart resumes only unstarted queue entries and never replays the operati
   assert.equal(retry.data.messageId, done.messages.find(item => item.text === 'WAITING_RESTART_MARKER').id);
   assert.equal(f.model.calls.length, 1);
 });
+
+test('queued mobile input preserves its workspace target and exact text only for that request', async t => {
+  const f = await fixture(t), owner = await f.register('mobile_fifo'), id = await f.room(owner);
+  await f.send(owner, id, '앞선 일반 대화');
+  const active = await f.model.next(0);
+  const queued = await f.send(owner, id, '설정 열어줘', {workspaceContext:'mobile'});
+  assert.equal(queued.data.queued,true);
+  const payload=JSON.parse(f.app.db.prepare('SELECT payload FROM message_queue WHERE id=?').get(queued.data.queueId).payload);
+  assert.equal(payload.workspaceContext,'mobile');
+  assert.equal(payload.text,'설정 열어줘');
+  active.finish('앞선 답변');
+  const mobile = await f.model.next(1);
+  assert.equal(currentRequestText(mobile.request),'설정 열어줘');
+  assert.match(mobile.request.system,/작업 공간 맥락:.*현재 대화의 모바일 입력창/);
+  mobile.finish('설정 결과');
+  await f.idle(owner,id);
+  await f.send(owner,id,'뒤의 일반 대화');
+  const ordinary = await f.model.next(2);
+  assert.doesNotMatch(ordinary.request.system,/작업 공간 맥락:/);
+  ordinary.finish('일반 답변');
+  const done=await f.idle(owner,id);
+  assert.deepEqual(done.messages.filter(message=>message.kind==='human').map(message=>message.text),['앞선 일반 대화','설정 열어줘','뒤의 일반 대화']);
+});
+
+for (const mobileFirst of [true,false]) test(`send now retains mobile workspace context when ${mobileFirst?'the original':'the added'} request comes from mobile`, async t => {
+  const f = await fixture(t), owner = await f.register('mobile_steer'), id = await f.room(owner);
+  await f.send(owner,id,'설정 열어줘',mobileFirst?{workspaceContext:'mobile'}:{});
+  await f.model.next(0);
+  const queued = await f.send(owner,id,'밝기도 내려줘',mobileFirst?{}:{workspaceContext:'mobile'});
+  assert.equal((await f.call(`/api/rooms/${id}/queue/${queued.data.queueId}/send-now`,{auth:owner,body:{}})).status,202);
+  const resumed = await f.model.next(1);
+  assert.match(resumed.request.system,/작업 공간 맥락:.*현재 대화의 모바일 입력창/);
+  assert.match(currentRequestText(resumed.request),/설정 열어줘/);
+  assert.match(currentRequestText(resumed.request),/밝기도 내려줘/);
+  const second = await f.send(owner,id,'소리도 줄여줘');
+  assert.equal((await f.call(`/api/rooms/${id}/queue/${second.data.queueId}/send-now`,{auth:owner,body:{}})).status,202);
+  const repeated = await f.model.next(2);
+  assert.match(repeated.request.system,/작업 공간 맥락:.*현재 대화의 모바일 입력창/);
+  assert.match(currentRequestText(repeated.request),/설정 열어줘/);
+  assert.match(currentRequestText(repeated.request),/소리도 줄여줘/);
+  repeated.finish('추가 요청 완료');
+  await f.idle(owner,id);
+});
+
+test('mobile workspace context survives restart of an unstarted queued request', async t => {
+  const f = await fixture(t), owner = await f.register('mobile_restart'), id = await f.room(owner);
+  await f.send(owner,id,'진행 중');
+  await f.model.next(0);
+  const queued = await f.send(owner,id,'설정 열어줘',{workspaceContext:'mobile'});
+  assert.equal(queued.data.queued,true);
+  await f.restart();
+  const resumed=await f.model.next(0);
+  assert.equal(currentRequestText(resumed.request),'설정 열어줘');
+  assert.match(resumed.request.system,/작업 공간 맥락:.*현재 대화의 모바일 입력창/);
+  resumed.finish('재시작 후 완료');
+  await f.idle(owner,id);
+});

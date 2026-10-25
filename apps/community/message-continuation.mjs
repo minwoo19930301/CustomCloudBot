@@ -25,9 +25,10 @@ function trimCheckpoints(state) {
     state.checkpoints.shift(); state.omittedCheckpoints++;
   }
 }
-export function createContinuation({requestText = '', continuation} = {}) {
+export function createContinuation({requestText = '', continuation, workspaceContext} = {}) {
   const inherited = continuation?.version === 1;
   const state = {
+    workspaceContext: workspaceContext === 'mobile' || inherited && continuation.workspaceContext === 'mobile' ? 'mobile' : '',
     // Ordinary channels (for example email) can carry a longer first request.
     // Reject an oversized steering handoff only when requested, never break its original run.
     requests: inherited ? requestsOf(continuation.requests) : [asText(requestText)],
@@ -64,6 +65,7 @@ export function snapshotContinuation(state, additionalText) {
   if (typeof additionalText === 'string' && additionalText.trim()) requests.push(additionalText);
   const snapshot = {
     version:1, requests:requestsOf(requests),
+    ...(state.workspaceContext === 'mobile' ? {workspaceContext:'mobile'} : {}),
     checkpoints:[...state.checkpoints.map(record => ({...record})), ...[...state.pending.values()].map(record => ({
       ...record, status:'uncertain', result:'추가 지시가 들어왔을 때 실행 중이었습니다. 완료 여부를 먼저 확인하세요.',
     }))],

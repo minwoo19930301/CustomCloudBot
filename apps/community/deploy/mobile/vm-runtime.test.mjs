@@ -96,6 +96,23 @@ test('legacy personal room shape provisions its exact private unit without weake
   assert.equal(calls.length,count);
 });
 
+test('broker umask 0077 preserves VM group access to immutable runtime metadata', async t => {
+  const {runtime, spec} = await fixture(t);
+  const previousMask = process.umask(0o077);
+  try {
+    await runtime.provision(spec);
+  } finally {
+    process.umask(previousMask);
+  }
+  const metadata = await stat(path.join(spec.dataDir, 'runtime.json'));
+  assert.equal(metadata.mode & 0o777, 0o640, 'the unprivileged VM group must be able to read runtime.json');
+  assert.equal(metadata.uid, process.getuid());
+  assert.equal(metadata.gid, process.getgid());
+  assert.equal((await stat(spec.dataDir)).mode & 0o777, 0o750);
+  assert.equal((await stat(path.join(spec.dataDir, 'seed.iso'))).mode & 0o777, 0o640);
+  assert.equal((await stat(path.join(spec.dataDir, 'disk.qcow2'))).mode & 0o777, 0o600);
+});
+
 test('partial seed failure cannot publish a bootable disk and does not disclose the credential', async t => {
   const {runtime, spec, failSeed} = await fixture(t);
   failSeed();

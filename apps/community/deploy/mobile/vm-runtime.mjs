@@ -139,6 +139,9 @@ export function createVMRuntime(env = process.env, {run = runVMCommand, controll
         await chown(temporarySeed, controllerUid, gid); await chmod(temporarySeed, 0o640);
         await writeFile(temporaryMetadata, JSON.stringify(metadata(spec)), {mode:0o640, flag:'wx'});
         await chown(temporaryMetadata, controllerUid, gid);
+        // The broker uses UMask=0077. Creation's mode is masked, so grant the
+        // VM group read access explicitly before publishing this root-owned file.
+        await chmod(temporaryMetadata, 0o640);
         abort(signal);
         await rename(temporarySeed, target.seed);
         await rename(temporaryMetadata, target.metadata);

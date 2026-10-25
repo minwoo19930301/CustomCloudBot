@@ -2781,7 +2781,7 @@ desktopUI = createDesktopUI({ api, getRoomId: () => state.selectedRoom, getRoomN
     send:async (roomId,text)=>{
       const prefs=roomPreferences(roomId),pane=state.extra.find(item=>item.roomId===roomId),selected=roomId===state.selectedRoom;
       const result=await api(`/api/rooms/${encodeURIComponent(roomId)}/messages`,{method:"POST",retryable:true,body:JSON.stringify({
-        text,clientNonce:crypto.randomUUID(),queueIfBusy:true,
+        text,clientNonce:crypto.randomUUID(),queueIfBusy:true,workspaceContext:"mobile",
         model:selected?$("#model-select").value:pane?.model||prefs.model||"",effort:selected?$("#effort-select").value:pane?.effort||prefs.effort||"",
         botIds:[state.selectedBots[0]||state.bots[0]?.id].filter(Boolean)
       })});

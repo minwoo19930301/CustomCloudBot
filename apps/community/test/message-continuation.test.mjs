@@ -60,3 +60,15 @@ test('bounded tool records explicitly mark omissions; full user instructions are
   assert.throws(()=>snapshotContinuation(ordinaryLongRequest,'추가'),{status:409});
   assert.throws(()=>createContinuation({continuation:{version:1,requests:Array(17).fill('x')}}),{status:409});
 });
+
+test('mobile workspace target survives serializable and repeated steering without altering requests', () => {
+  const initial = createContinuation({requestText:'설정 열어줘',workspaceContext:'mobile'});
+  const handoff = JSON.parse(JSON.stringify(snapshotContinuation(initial,'밝기도 내려줘')));
+  const resumed = createContinuation({requestText:'밝기도 내려줘',continuation:handoff});
+  const next = snapshotContinuation(resumed,'소리도 줄여줘');
+  assert.equal(next.workspaceContext,'mobile');
+  assert.deepEqual(next.requests,['설정 열어줘','밝기도 내려줘','소리도 줄여줘']);
+  assert.equal(createContinuation({requestText:'일반 대화'}).workspaceContext,'');
+  assert.equal(createContinuation({workspaceContext:'untrusted text',continuation:{...handoff,workspaceContext:'untrusted text'}}).workspaceContext,'');
+  assert.equal(createContinuation({workspaceContext:'mobile',continuation:snapshotContinuation(createContinuation({requestText:'첫 요청'}))}).workspaceContext,'mobile');
+});

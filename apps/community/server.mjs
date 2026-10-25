@@ -743,7 +743,7 @@ export async function startCommunity(options = {}) {
     let calls = 0;
     const turnReplies=[];
     try {
-      activeRun.continuationState=createContinuation({requestText:channel.requestText ?? channel.mailText ?? "",continuation:channel.continuation});
+      activeRun.continuationState=createContinuation({requestText:channel.requestText ?? channel.mailText ?? "",continuation:channel.continuation,workspaceContext:channel.workspaceContext});
       reportProgress(room.id,"context","맥락 확인 중");
       const ownerAccess = hostAdmin.authorized(userId,room.id);
       const personal = ownerAccess || ((isPersonalRoom(room) || isMailRoom(room)) && room.owner_id === userId && db.prepare("SELECT role FROM users WHERE id=?").get(userId)?.role === "admin");
@@ -823,6 +823,7 @@ export async function startCommunity(options = {}) {
                   identity() + "이번 작업 역할은 " + bot.name + "입니다." +
                   (personal ? CONNECTED_SERVICE_PROMPT : "\n개인 연결 서비스는 왼쪽 개인 비서 대화에서 사용할 수 있습니다. 공동 대화에서는 개인 메일과 캘린더를 조회하지 않습니다. 로그인 비밀번호나 인증 코드를 대화에 요청하지 마세요.") +
                   (hasMobile ? "\n" + MOBILE_TOOL_PROMPT : "") +
+                  (activeRun.continuationState.workspaceContext === "mobile" ? "\n작업 공간 맥락: 이번 작업에는 현재 대화의 모바일 입력창에서 보낸 요청이 포함되어 있습니다. 대상이 생략된 기기 조작 요청(예: 설정 열어줘)은 이 대화에 연결된 Android를 대상으로 해석하세요. 사용자가 다른 대상을 명시하면 그 지시를 따르세요. 이 맥락은 권한을 추가하지 않습니다. 제공된 모바일 도구로만 해당 기기를 조작하고 결과를 확인하세요. 도구가 없으면 연결이 필요하다고 안내하세요." : "") +
                   (canLogin ? "\n로그인 비밀번호는 전용 Vault 창으로만 입력받으세요. 로그인 페이지를 연 뒤 request_browser_login 도구를 사용하고 사용자 입력을 기다리세요. 저장된 계정이나 비밀번호를 파일/환경변수/서버 도구로 읽거나 대화에 복사하지 마세요. " + (pendingLogin ? "현재 로그인 페이지에 대한 Vault 선택 창을 이미 요청했습니다. 다시 요청하거나 로그인 완료라고 주장하지 말고 계정 선택을 기다리세요." : "") : "") +
                   (hostExecutor ? HOST_ADMIN_PROMPT : ownerAccess ? "\n이번 요청의 서버 명령 실행은 앞선 봇이 담당합니다. 앞선 실행 결과를 검토하고 필요한 후속 작업을 설명하되, 같은 변경을 다시 실행하거나 다른 도구로 우회하지 마세요." : "") +
                   "\n사용자의 최근 메시지에 한국어로 간결하게 답하세요. 최종 답변은 일반 텍스트로 작성하세요. 역할: " +
@@ -1047,6 +1048,8 @@ export async function startCommunity(options = {}) {
     if (!Array.isArray(attachmentIds) || attachmentIds.length > 4 || attachmentIds.some((id) => typeof id !== "string" || !/^[a-f0-9-]{36}$/.test(id))) throw failure(400, "첨부 파일을 다시 선택해 주세요.");
     const content = attachmentIds.length ? text(body.text ?? "", 4000) : text(body.text, 4000, true),
       nonce = text(body.clientNonce ?? "", 100, true);
+    const workspaceContext = body.workspaceContext ?? "";
+    if (workspaceContext !== "" && workspaceContext !== "mobile") throw failure(400, "작업 공간을 다시 선택해 주세요.");
     const modelChoice = text(typeof body.model === "string" ? body.model : "", 200);
     const effortChoice = text(typeof body.effort === "string" ? body.effort : "", 16);
     if (modelChoice && !/^[\w.:/@+-]{1,200}$/.test(modelChoice)) throw failure(400, "모델을 다시 선택해 주세요.");
@@ -1059,7 +1062,7 @@ export async function startCommunity(options = {}) {
       throw failure(400, "응답할 봇을 다시 선택해 주세요.");
     const selected = [...new Set(body.botIds ?? [])];
     const scopedNonce = hash(user.id + ":" + nonce);
-    const payload={text:content,clientNonce:nonce,model:modelChoice,effort:effortChoice,botIds:selected,attachmentIds:[...new Set(attachmentIds)]};
+    const payload={text:content,clientNonce:nonce,model:modelChoice,effort:effortChoice,botIds:selected,attachmentIds:[...new Set(attachmentIds)],workspaceContext};
     const accepted = () => ({accepted: true, messageId: db.prepare("SELECT id FROM messages WHERE room_id=? AND client_nonce=?").get(room.id, scopedNonce)?.id});
     if (
       db
@@ -1151,7 +1154,7 @@ export async function startCommunity(options = {}) {
       roomProgress.set(room.id,[]);
       roomJobs.add(room.id);
       reportProgress(room.id,"accepted","요청 접수됨");
-      const job = botRun(room, selected, user.id, choice, {signal,requestText:content,messageId:submittedMessageId,modelChoice,effortChoice,queueId:queuedItem?.id,continuation:queuedItem?.payload.continuation});
+      const job = botRun(room, selected, user.id, choice, {signal,requestText:content,messageId:submittedMessageId,modelChoice,effortChoice,workspaceContext,queueId:queuedItem?.id,continuation:queuedItem?.payload.continuation});
       jobs.add(job);
       void job.then(result=>{if(queuedItem)messageQueue.finish(queuedItem.id,result.interrupted?"interrupted":result.ok?"completed":"failed");}).finally(() => {jobs.delete(job);scheduleQueueDrain();}).catch(() => {});
     } else if(queuedItem) {
