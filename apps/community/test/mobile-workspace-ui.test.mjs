@@ -199,3 +199,47 @@ test('temporary mobile connection errors retain retry guidance and recover on th
   assert.match(find(mount,'mobile-screen-message').textContent,/휴면 중/);
   assert.equal(statuses.at(-1).kind,'');
 });
+
+test('preparing VM remains visible and duplicate wake is disabled until a real Android frame loads',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {mount}=dom(),requests=[],statuses=[];let state='starting',finishFrame,frameRequests=0;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=()=>{frameRequests++;return new Promise(resolve=>{finishFrame=resolve;});};
+  const view=createMobileWorkspace({mount,roomId:'room-A',api:async path=>{
+    requests.push(path);
+    if(path.endsWith('/observe'))return {width:720,height:1560,nodes:[]};
+    return {device:{state},capacity:{running:1,maxRunning:1}};
+  },onStatus:(message,kind)=>statuses.push({message,kind}),mobileChat:{load:async()=>({messages:[],readOnly:false}),send:async()=>{}}});
+  t.after(()=>{view.destroy();globalThis.fetch=originalFetch;});
+  await flush();
+  assert.match(find(mount,'mobile-screen-message').textContent,/준비하는 중.*몇 분/);
+  assert.equal(buttonBy(mount,'모바일 깨우기').disabled,true);
+  buttonBy(mount,'모바일 깨우기').onclick();await flush();
+  assert.ok(requests.every(path=>!path.endsWith('/wake')));
+  assert.equal(frameRequests,0);
+  assert.equal(find(mount,'mobile-chat-input').disabled,false,'room chat stays usable during cold boot');
+  state='running';t.mock.timers.tick(5000);await flush();
+  assert.equal(frameRequests,1);
+  assert.match(find(mount,'mobile-screen-message').textContent,/화면을 불러오는 중/);
+  assert.ok(statuses.every(status=>status.kind!=='ready'));
+  finishFrame(new Response(new Uint8Array([1,2,3]),{headers:{'content-type':'image/png'}}));await flush();
+  assert.ok(statuses.every(status=>status.kind!=='ready'),'response bytes alone do not prove the image decoded');
+  const image=find(mount,'mobile-screen-image');image.naturalWidth=720;image.naturalHeight=1560;image.fire('load');
+  assert.deepEqual(statuses.at(-1),{message:'Android 연결됨',kind:'ready'});
+  assert.equal(image.hidden,false);
+  assert.equal(buttonBy(mount,'모바일 화면 확대').disabled,false);
+});
+
+test('asynchronous capacity failures show their actual cause and allow an explicit retry',async t=>{
+  const {mount}=dom(),requests=[],statuses=[];
+  const view=createMobileWorkspace({mount,roomId:'room-A',api:async path=>{
+    requests.push(path);return {device:{state:'error',lastError:'device_capacity_busy'}};
+  },onStatus:(message,kind)=>statuses.push({message,kind}),mobileChat:{load:async()=>({messages:[],readOnly:false}),send:async()=>{}}});
+  t.after(()=>view.destroy());await flush();
+  assert.match(find(mount,'mobile-screen-message').textContent,/다른 모바일이 실행 중/);
+  assert.equal(statuses.at(-1).kind,'error');
+  assert.equal(buttonBy(mount,'모바일 깨우기').disabled,false);
+  assert.ok(requests.every(path=>!path.endsWith('/wake')),'failed boots are not retried indefinitely');
+  buttonBy(mount,'모바일 깨우기').onclick();await flush();
+  assert.equal(requests.filter(path=>path.endsWith('/wake')).length,1);
+});

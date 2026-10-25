@@ -1,0 +1,51 @@
+[Unit]
+Description=CustomCloudBot private mobile VM %i
+Requires=customcloudbot-mobile-vm-firewall.service
+After=customcloudbot-mobile-vm-firewall.service network-online.target
+
+[Service]
+Type=simple
+User=ccb-mobile-vm
+Group=ccb-mobile-vm
+ExecStart=/usr/bin/python3 /opt/customcloudbot-mobile/vm-launch.py %i
+ExecStop=/usr/bin/python3 /opt/customcloudbot-mobile/vm-poweroff.py %i
+RuntimeDirectory=customcloudbot-mobile-vm/%i
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+# A shared unprivileged UID must not reach another VM's files through
+# /proc/<pid>/root or /proc/<pid>/fd. TCG initialization was tested with this.
+InaccessiblePaths=/proc
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+LockPersonality=yes
+UMask=0077
+# Hide every other room even though the unprivileged QEMU processes share a UID.
+TemporaryFileSystem=/var/lib/customcloudbot-mobile-vm:ro
+BindReadOnlyPaths=/var/lib/customcloudbot-mobile-vm/base
+BindPaths=/var/lib/customcloudbot-mobile-vm/rooms/%i
+ReadWritePaths=/var/lib/customcloudbot-mobile-vm/rooms/%i
+TemporaryFileSystem=/run/customcloudbot-mobile-vm:ro
+BindPaths=/run/customcloudbot-mobile-vm/%i
+ReadWritePaths=/run/customcloudbot-mobile-vm/%i
+# TCG generates executable code; MemoryDenyWriteExecute must not be enabled.
+MemoryMax=6G
+CPUQuota=200%
+TasksMax=128
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=45
+SendSIGKILL=yes
+Restart=no
+StandardOutput=null
+StandardError=journal

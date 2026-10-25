@@ -170,6 +170,55 @@ test("AI tools wake their room, execute a validated action and read bounded untr
   assert.deepEqual(f.requests.at(-2).body, { package: "com.android.settings" });
 });
 
+test("UI wake returns preparing immediately while AI waits for Android before sending input", async t => {
+  const f = await fixture(t, { readyPollMs: 1 });
+  let polls = 0;
+  f.setHandler((request, response) => {
+    if (request.url.endsWith('/observe')) return json(response, observation());
+    if (request.url.endsWith('/wake')) return json(response, { device: { state: 'starting' } });
+    if (request.method === 'GET') return json(response, { device: { state: ++polls < 3 ? 'starting' : 'running' } });
+    assert.ok(polls >= 3, 'input must wait for the actual Android readiness reply');
+    json(response, { ok: true });
+  });
+  assert.equal((await f.hub.wake(ROOM)).device.state, 'starting');
+  assert.equal(f.requests.length, 1, 'the UI wake does not wait through boot');
+  await f.hub.execute(ROOM, 'mobile_key', { key: 'HOME' });
+  assert.equal(polls, 3);
+  assert.deepEqual(f.requests.slice(1).map(request => request.url), [
+    `/devices/${ROOM}/wake`, `/devices/${ROOM}`, `/devices/${ROOM}`, `/devices/${ROOM}`,
+    `/devices/${ROOM}/input`, `/devices/${ROOM}/observe`,
+  ]);
+});
+
+test("failed or slow Android startup never sends an AI action or treats a VM process as ready", async t => {
+  const f = await fixture(t, { readyPollMs: 1, readyTimeoutMs: 20 });
+  let failed = true;
+  f.setHandler((request, response) => json(response, { device: {
+    state: request.url.endsWith('/wake') || !failed ? 'starting' : 'error', lastError: 'vm_boot_timeout',
+  } }));
+  await assert.rejects(f.hub.execute(ROOM, 'mobile_key', { key: 'HOME' }), error => error.code === 'vm_boot_timeout');
+  failed = false;
+  await assert.rejects(f.hub.execute(ROOM, 'mobile_key', { key: 'HOME' }), error => error.code === 'MOBILE_PREPARING');
+  assert.ok(f.requests.every(request => !request.url.endsWith('/input') && !request.url.endsWith('/observe')));
+  assert.equal(f.requests.filter(request => request.url.endsWith('/wake')).length, 2, 'status polling does not repeatedly wake the VM');
+});
+
+test("cancelling an AI wait stops polling and retry stays on the same room", async t => {
+  const f = await fixture(t, { readyPollMs: 1 });
+  const controller = new AbortController();
+  f.setHandler((request, response) => {
+    json(response, { device: { state: 'starting' } });
+    if (!request.url.endsWith('/wake')) controller.abort();
+  });
+  await assert.rejects(f.hub.execute(ROOM, 'mobile_observe', {}, { signal: controller.signal }), error => error.code === 'MOBILE_CANCELLED');
+  const count = f.requests.length;
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.requests.length, count);
+  f.setHandler((request, response) => json(response, request.url.endsWith('/observe') ? observation() : { device: { state: 'running' } }));
+  await f.hub.execute(ROOM, 'mobile_observe');
+  assert.ok(f.requests.every(request => request.url.startsWith(`/devices/${ROOM}`)));
+});
+
 test("observations trim node data, clamp bounds and discard non-UI broker fields", async t => {
   const f = await fixture(t);
   f.setHandler((request, response) => {

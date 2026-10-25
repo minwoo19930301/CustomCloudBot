@@ -1,0 +1,13 @@
+[Unit]
+Description=CustomCloudBot mobile VM egress boundary
+After=firewalld.service network-online.target
+Before=customcloudbot-mobile-vm@.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/customcloudbot-mobile/vm-firewall.py
+RemainAfterExit=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

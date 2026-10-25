@@ -89,6 +89,11 @@ const BROKER_ERRORS = {
   device_slots_full: "All saved mobile device slots are in use",
   device_sleeping: "This mobile device is sleeping; wake it before use",
   device_busy: "This mobile device is working and cannot sleep yet",
+  vm_boot_timeout: "The mobile VM did not finish starting; retry after checking its runtime",
+  device_boot_timeout: "Android did not finish starting; retry after checking its runtime",
+  vm_start_failed: "The mobile VM could not start; check the private runtime",
+  vm_stop_failed: "The previous mobile VM has not stopped yet; try again shortly",
+  vm_recovery_required: "The mobile runtime restarted; wake this device again",
   text_unicode_unsupported: "This device keyboard does not support that text yet",
 };
 
@@ -110,7 +115,7 @@ function boundedObservation(value) {
 }
 
 /** The HTTP server authenticates room membership; this adapter never accepts a target room in tool arguments. */
-export function createMobileHub({ getConfig, assertWritable = async () => {}, env = process.env, allowInsecureLoopback = env.NODE_ENV !== "production", allowInternalHttp = env.MOBILE_BROKER_ALLOW_INTERNAL_HTTP === "1", timeoutMs = 15000, wakeTimeoutMs = 120000, leaseIntervalMs = 30000 } = {}) {
+export function createMobileHub({ getConfig, assertWritable = async () => {}, env = process.env, allowInsecureLoopback = env.NODE_ENV !== "production", allowInternalHttp = env.MOBILE_BROKER_ALLOW_INTERNAL_HTTP === "1", timeoutMs = 15000, wakeTimeoutMs = 600000, readyTimeoutMs = 600000, readyPollMs = 1000, leaseIntervalMs = 30000 } = {}) {
   const tasks = new Map();
   const queues = new Map();
   const depths = new Map();
@@ -236,10 +241,42 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     const result = await request(route(roomId, "wake"), { method: "POST", body: {}, signal: options.signal, timeout: wakeTimeoutMs });
     await writable(roomId, options);
     const active = tasks.get(roomKey(roomId));
-    if (active?.count) await lease(roomKey(roomId), true, active);
+    if (active?.count && ["running", "starting", "booting"].includes(result.device?.state)) await lease(roomKey(roomId), true, active);
     return result;
   };
   const status = (roomId, options = {}) => request(route(roomId), { signal: options.signal });
+  const waitForAndroid = async (roomId, options = {}) => {
+    let result = await wakeRaw(roomId, options);
+    const deadline = Date.now() + readyTimeoutMs;
+    while (["starting", "booting"].includes(result.device?.state)) {
+      await writable(roomId, options);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw fail(504, "MOBILE_PREPARING", "Android is still preparing; check its status before retrying");
+      await new Promise((resolve, reject) => {
+        let timer;
+        const done = () => { options.signal?.removeEventListener("abort", abort); resolve(); };
+        const abort = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", abort); reject(fail(499, "MOBILE_CANCELLED", "Mobile operation cancelled")); };
+        timer = setTimeout(done, Math.min(Math.max(1, readyPollMs), remaining));
+        options.signal?.addEventListener("abort", abort, { once: true });
+        if (options.signal?.aborted) abort();
+      });
+      await writable(roomId, options);
+      const pollRemaining = deadline - Date.now();
+      if (pollRemaining <= 0) throw fail(504, "MOBILE_PREPARING", "Android is still preparing; check its status before retrying");
+      try { result = await request(route(roomId), { signal: options.signal, timeout: Math.min(timeoutMs, pollRemaining) }); }
+      catch (error) {
+        if (error.code === "MOBILE_TIMEOUT" && (pollRemaining <= timeoutMs || Date.now() >= deadline)) throw fail(504, "MOBILE_PREPARING", "Android is still preparing; check its status before retrying");
+        throw error;
+      }
+    }
+    if (result.device?.state !== "running") {
+      const code = Object.hasOwn(BROKER_ERRORS, result.device?.lastError || "") ? result.device.lastError : "MOBILE_START_FAILED";
+      throw fail(503, code, BROKER_ERRORS[code] || "Android could not start; check the mobile workspace and retry");
+    }
+    const active = tasks.get(roomKey(roomId));
+    if (active?.count) await lease(roomKey(roomId), true, active);
+    return result;
+  };
   const observeRaw = async (roomId, options = {}) => boundedObservation(await request(route(roomId, "observe"), { signal: options.signal }));
   const inputRaw = async (roomId, action, options = {}) => {
     const input = validateMobileInput(action);
@@ -258,7 +295,7 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     let action;
     if (name === "mobile_launch") packageName(args.package);
     else if (name !== "mobile_observe") action = validateMobileInput({ ...args, type: name.replace("mobile_", "") });
-    await wakeRaw(roomId, options);
+    await waitForAndroid(roomId, options);
     if (name === "mobile_launch") await launchRaw(roomId, args.package, options);
     else if (action) await inputRaw(roomId, action, options);
     await writable(roomId, options);

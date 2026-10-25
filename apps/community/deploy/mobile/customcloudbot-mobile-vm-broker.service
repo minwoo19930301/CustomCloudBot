@@ -1,0 +1,41 @@
+[Unit]
+Description=CustomCloudBot private per-conversation Android VM broker
+Requires=customcloudbot-mobile-vm-firewall.service
+After=customcloudbot-mobile-vm-firewall.service network-online.target
+
+[Service]
+Type=simple
+User=root
+# The deployed app runs with host gid 1000 (opc). Only its private socket is shared.
+Group=opc
+RuntimeDirectory=community-mobile
+RuntimeDirectoryMode=0750
+WorkingDirectory=/opt/customcloudbot-mobile
+EnvironmentFile=/etc/customcloudbot-mobile-vm.env
+ExecStart=/usr/bin/node /opt/customcloudbot-mobile/vm-service.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/customcloudbot-mobile-vm
+ReadWritePaths=/run/community-mobile
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target
