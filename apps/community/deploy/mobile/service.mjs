@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { chmod, lstat, mkdir, unlink } from 'node:fs/promises';
-import { configuration, DevicePool, MobileError } from './device-pool.mjs';
+import { configuration, DevicePool, MobileError, operationDiagnostic } from './device-pool.mjs';
 
 // Capture the loaded runtime once. Reading updated files per request could let
 // an old process advertise a revision whose code it has not actually loaded.
@@ -40,12 +40,16 @@ function send(response, status, data) {
   response.end(JSON.stringify(data));
 }
 
-export function createServer(pool, token) {
+export function createServer(pool, token, { logFailure = entry => console.error(JSON.stringify(entry)) } = {}) {
   let activeRequests = 0;
   const server = http.createServer(async (request, response) => {
     if (!authorized(request, token)) { send(response, 401, { error: 'unauthorized', message: 'Authentication is required.' }); return; }
     if (activeRequests >= 64) { send(response, 429, { error: 'broker_busy', message: 'The mobile service is busy.' }); return; }
     activeRequests++;
+    const started = Date.now(), controller = new AbortController();
+    const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+    request.once('aborted', disconnected); response.once('close', disconnected);
+    const options = { signal: controller.signal };
     try {
       const url = new URL(request.url, 'http://mobile.internal');
       if (url.search) throw new MobileError('invalid_request', 'Query parameters are not accepted.');
@@ -55,26 +59,31 @@ export function createServer(pool, token) {
       const [, room, action] = match;
       if (request.method === 'GET' && !action) { send(response, 200, await pool.status(room)); return; }
       if (request.method === 'GET' && action === 'screenshot') {
-        const png = await pool.screenshot(room);
+        const png = await pool.screenshot(room, options);
         response.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': png.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(png); return;
       }
-      if (request.method === 'GET' && action === 'observe') { send(response, 200, await pool.observe(room)); return; }
+      if (request.method === 'GET' && action === 'observe') { send(response, 200, await pool.observe(room, options)); return; }
       if (request.method !== 'POST') throw new MobileError('method_not_allowed', 'This HTTP method is not supported.', 405);
       const body = await jsonBody(request);
       let result;
       if (action === 'wake') result = await pool.wake(room);
       else if (action === 'sleep') result = await pool.sleep(room);
       else if (action === 'lease') result = await pool.lease(room, body.active);
-      else if (action === 'input') result = await pool.input(room, body);
-      else if (action === 'launch') result = await pool.launch(room, body.package);
+      else if (action === 'input') result = await pool.input(room, body, options);
+      else if (action === 'launch') result = await pool.launch(room, body.package, options);
       else throw new MobileError('not_found', 'This route does not exist.', 404);
       send(response, 200, result);
     } catch (error) {
+      const diagnostic = operationDiagnostic(error);
+      if (diagnostic) logFailure({ event: 'request_failed', ...diagnostic, requestMs: Math.max(0, Date.now() - started) });
+      else if (!(error instanceof MobileError)) logFailure({ event: 'request_failed', code: 'device_operation_failed', requestMs: Math.max(0, Date.now() - started) });
       if (response.destroyed) return;
       if (error instanceof MobileError) send(response, error.status, { error: error.code, message: error.message });
-      else { console.error(JSON.stringify({ event: 'request_failed', code: 'device_operation_failed' })); send(response, 503, { error: 'device_operation_failed', message: 'The mobile operation could not be completed.' }); }
-    } finally { activeRequests--; }
+      else { send(response, 503, { error: 'device_operation_failed', message: 'The mobile operation could not be completed.' }); }
+    } finally {
+      activeRequests--; request.removeListener('aborted', disconnected); response.removeListener('close', disconnected);
+    }
   });
   server.headersTimeout = 10_000;
   server.requestTimeout = 180_000;

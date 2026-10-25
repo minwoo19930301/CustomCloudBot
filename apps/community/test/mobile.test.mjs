@@ -26,7 +26,7 @@ async function fixture(t, options = {}) {
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   let settings = { endpoint: `http://127.0.0.1:${server.address().port}`, token: TOKEN };
-  const hub = createMobileHub({ getConfig: () => settings, allowInsecureLoopback: true, ...options });
+  const hub = createMobileHub({ getConfig: () => settings, allowInsecureLoopback: true, log: () => {}, ...options });
   t.after(async () => { await hub.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   return { hub, requests, server, setHandler: value => { handler = value; }, setConfig: value => { settings = value; }, settings: () => settings };
 }
@@ -316,6 +316,72 @@ test("screenshots coalesce for viewers and return only supported bounded image b
   assert.equal(f.requests.length, 1);
   f.setHandler((request, response) => { response.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": 4 * 1024 * 1024 + 1 }); response.end(); });
   await assert.rejects(f.hub.screenshot(ROOM), error => error.code === "MOBILE_RESPONSE_TOO_LARGE");
+});
+
+test("concurrent viewer observations coalesce per room but never reuse a read across a later action", async t => {
+  const f = await fixture(t);
+  const first = f.hub.observe(ROOM), second = f.hub.observe(ROOM), other = f.hub.observe(OTHER);
+  assert.equal(first, second); assert.notEqual(first, other);
+  await Promise.all([first, second, other]);
+  assert.equal(f.requests.filter(request => request.url === `/devices/${ROOM}/observe`).length, 1);
+  await f.hub.input(ROOM, { type: "key", key: "HOME" });
+  await f.hub.observe(ROOM);
+  assert.equal(f.requests.filter(request => request.url === `/devices/${ROOM}/observe`).length, 2, "the next view reads the screen after the action");
+});
+
+test("a separately cancellable viewer cannot cancel a coalesced room observation", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const cancelled = f.hub.observe(ROOM, { signal: controller.signal });
+  const shared = f.hub.observe(ROOM), second = f.hub.observe(ROOM);
+  controller.abort();
+  await assert.rejects(cancelled, error => error.code === "MOBILE_CANCELLED");
+  assert.equal(shared, second); assert.deepEqual(await shared, { ...observation(), truncated: false, nodes: [{ ...observation().nodes[0], editable: false, focused: false }] });
+  assert.equal(f.requests.length, 1);
+});
+
+test("device operations have a longer total deadline than lightweight health and status checks", async t => {
+  const f = await fixture(t, { timeoutMs: 20, operationTimeoutMs: 200 });
+  f.setHandler((request, response) => setTimeout(() => {
+    if (request.url.endsWith('/screenshot')) { response.writeHead(200, { 'Content-Type': 'image/jpeg' }); response.end(Buffer.from([255, 216, 255, 217])); }
+    else json(response, request.url.endsWith('/observe') ? observation() : { ok: true });
+  }, 60));
+  await assert.rejects(f.hub.health(), error => error.code === 'MOBILE_TIMEOUT');
+  await assert.rejects(f.hub.status(ROOM), error => error.code === 'MOBILE_TIMEOUT');
+  await f.hub.startTask(ROOM);
+  await f.hub.input(ROOM, { type: 'key', key: 'HOME' });
+  await f.hub.launch(ROOM, 'com.android.settings');
+  await f.hub.observe(ROOM);
+  await f.hub.screenshot(ROOM);
+  await f.hub.endTask(ROOM);
+  await f.hub.sleep(ROOM);
+  assert.equal(f.requests.length, 9);
+});
+
+test("device deadlines stay bounded and log only safe action, code and duration", async t => {
+  const events = [], secret = 'private typed password', f = await fixture(t, { timeoutMs: 10, operationTimeoutMs: 50, log: entry => events.push(entry) });
+  f.setHandler(() => {});
+  await assert.rejects(f.hub.input(ROOM, { type: 'text', text: secret }), error => error.code === 'MOBILE_TIMEOUT');
+  assert.equal(events.length, 1);assert.deepEqual(Object.keys(events[0]).sort(), ['action', 'code', 'durationMs', 'event']);
+  assert.equal(events[0].action, 'input');assert.equal(events[0].code, 'MOBILE_TIMEOUT');assert.equal(events[0].event, 'mobile_operation_failed');
+  assert.ok(events[0].durationMs >= 40 && events[0].durationMs < 2000);
+  f.setHandler((request, response) => json(response, { error: 'guest_request_timeout', message: secret }, 503));
+  await assert.rejects(f.hub.launch(ROOM, 'com.private.application'), error => error.code === 'guest_request_timeout');
+  assert.equal(events[1].action, 'launch');assert.equal(events[1].code, 'guest_request_timeout');
+  f.setHandler((request, response) => json(response, { error: 'private_broker_echo', message: secret }, 502));
+  await assert.rejects(f.hub.observe(ROOM));assert.equal(events[2].code, 'MOBILE_BROKER_ERROR');
+  const logged = JSON.stringify(events);
+  for (const privateValue of [secret, TOKEN, ROOM, 'com.private.application', 'private_broker_echo', '127.0.0.1']) assert.equal(logged.includes(privateValue), false);
+});
+
+test("device timeout, cancellation and queue errors preserve their safe code and HTTP status", async t => {
+  const events = [], f = await fixture(t, { log: entry => events.push(entry) });
+  for (const [code, status, message] of [['device_operation_timeout', 504, /took too long/], ['device_operation_cancelled', 409, /cancelled/], ['device_queue_timeout', 503, /busy/]]) {
+    f.setHandler((request, response) => json(response, { error: code, message: 'private Android command output' }, status));
+    await assert.rejects(f.hub.input(ROOM, { type: 'key', key: 'HOME' }), error => error.code === code && error.status === status && message.test(error.message));
+    assert.equal(events.at(-1).code, code);
+  }
+  assert.equal(JSON.stringify(events).includes('private Android command output'), false);
 });
 
 test("requests respect cancellation and a total timeout even if broker keeps sending bytes", async t => {

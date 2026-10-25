@@ -18,7 +18,7 @@ class Element {
   setPointerCapture(){}releasePointerCapture(){}
   fire(type,details={}){const event={target:this,button:0,pointerId:1,preventDefault(){this.prevented=true;},stopPropagation(){},...details};for(const handler of this.handlers.get(type)||[])handler(event);return event;}
 }
-function dom(){const document={hidden:false,activeElement:null,createElement(tag){return new Element(this,tag);}};return {document,mount:new Element(document)};}
+function dom(){const document={hidden:false,activeElement:null,handlers:new Map(),addEventListener:Element.prototype.addEventListener,removeEventListener:Element.prototype.removeEventListener,fire:Element.prototype.fire,createElement(tag){return new Element(this,tag);}};return {document,mount:new Element(document)};}
 const find=(root,className)=>root.className?.split(' ').includes(className)?root:root.children.flatMap(child=>{const found=find(child,className);return found?[found]:[];})[0];
 const buttonBy=(root,label)=>root.attributes?.['aria-label']===label?root:root.children.flatMap(child=>{const found=buttonBy(child,label);return found?[found]:[];})[0];
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
@@ -86,15 +86,15 @@ test('remote keyboard arrows and enter are sent once, and deactivation clears pr
   assert.equal(input.value,'\u200b');assert.equal(input.disabled,true);keyboard.destroy();
 });
 
-async function fixture(t,{readOnly=false,running=true,lastError,onStatus,send=async()=>{},fetchFrame=null,draft,initialMessages}={}){
+async function fixture(t,{readOnly=false,running=true,busy=false,lastError,onStatus,send=async()=>{},fetchFrame=null,observe=null,draft,initialMessages}={}){
   const {document,mount}=dom(),requests=[],messages=initialMessages||[{id:'m1',role:'user',content:'이 모바일의 설정을 열어줘.'}];
   const originalFetch=globalThis.fetch;globalThis.fetch=fetchFrame||(async()=>new Response(new Uint8Array([1,2,3]),{headers:{'content-type':'image/png'}}));
   t.after(()=>{globalThis.fetch=originalFetch;view.destroy();});
-  const api=async(path,options={})=>{requests.push({path,options});if(path.endsWith('/observe'))return {width:720,height:1560,nodes:[{editable:true,enabled:true,bounds:{left:0,top:0,right:200,bottom:200}}]};if(path.endsWith('/input'))return {ok:true};return {device:{state:running?'running':'sleeping',lastError},capacity:{running:running?1:0,maxRunning:2},readOnly};};
+  const api=async(path,options={})=>{requests.push({path,options});if(path.endsWith('/observe'))return observe?observe(options):{width:720,height:1560,nodes:[{editable:true,enabled:true,bounds:{left:0,top:0,right:200,bottom:200}}]};if(path.endsWith('/input'))return {ok:true};return {device:{state:running?'running':'sleeping',lastError},capacity:{running:running?1:0,maxRunning:2},readOnly};};
   const loads=[],sends=[];
-  const view=createMobileWorkspace({mount,api,roomId:'room-A',draft,onStatus,mobileChat:{load:async(roomId)=>{loads.push(roomId);return {messages,readOnly};},send:async(roomId,text)=>{sends.push({roomId,text});await send();messages.push({id:'m2',role:'user',content:text});}}});
+  const view=createMobileWorkspace({mount,api,roomId:'room-A',draft,onStatus,mobileChat:{load:async(roomId)=>{loads.push(roomId);return {messages,readOnly,busy};},send:async(roomId,text)=>{sends.push({roomId,text});await send();messages.push({id:'m2',role:'user',content:text});}}});
   await flush();await flush();
-  return {view,document,mount,requests,loads,sends,setLastError:value=>{lastError=value;},input:find(mount,'mobile-chat-input'),form:find(mount,'mobile-chat-form'),image:find(mount,'mobile-screen-image')};
+  return {view,document,mount,requests,loads,sends,setBusy:value=>{busy=value;},setLastError:value=>{lastError=value;},input:find(mount,'mobile-chat-input'),form:find(mount,'mobile-chat-form'),image:find(mount,'mobile-screen-image')};
 }
 
 test('mobile chat sends through the existing room callback and updates the same room transcript',async t=>{
@@ -157,6 +157,92 @@ test('destroy aborts screenshot polling and ignores late frames without making o
   f.view.destroy();complete(new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}}));await flush();
   assert.equal(f.mount.children.length,0);assert.equal(f.image.src,undefined);const count=f.requests.length;
   f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});await flush();assert.equal(f.requests.length,count);
+});
+
+test('slow screenshots and editable-region reads share one completion-driven polling loop',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const frames=[];let finishObserve;
+  const f=await fixture(t,{fetchFrame:()=>new Promise(resolve=>frames.push(resolve)),observe:()=>new Promise(resolve=>{finishObserve=resolve;})});
+  assert.equal(frames.length,1);assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,0);
+  t.mock.timers.tick(15000);await flush();
+  assert.equal(frames.length,1,'status refreshes cannot queue another screenshot');
+  assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,0,'observe waits for the screenshot');
+  frames[0](new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}}));await flush();
+  assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,1);
+  t.mock.timers.tick(15000);await flush();
+  assert.equal(frames.length,1,'the next screenshot waits for the editable map');
+  assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,1);
+  finishObserve({width:720,height:1560,nodes:[]});await flush();
+  t.mock.timers.tick(999);await flush();assert.equal(frames.length,1);
+  t.mock.timers.tick(1);await flush();assert.equal(frames.length,2);
+});
+
+test('hiding the workspace cancels its read and resuming starts only one screen loop',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const frames=[],statuses=[];
+  const f=await fixture(t,{onStatus:(message,kind)=>statuses.push({message,kind}),fetchFrame:(url,{signal})=>new Promise((resolve,reject)=>{
+    frames.push({resolve,signal});signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true});
+  })});
+  f.document.hidden=true;f.document.fire('visibilitychange');await flush();
+  assert.equal(frames[0].signal.aborted,true);const requestCount=f.requests.length;
+  t.mock.timers.tick(60000);await flush();assert.equal(frames.length,1);assert.equal(f.requests.length,requestCount);
+  f.document.hidden=false;f.document.fire('visibilitychange');f.document.fire('visibilitychange');await flush();
+  assert.equal(frames.length,2);assert.ok(statuses.every(status=>status.kind!=='error'),'normal hidden-state cancellation is silent');
+  frames[1].resolve(new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}}));await flush();
+  assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,1);
+  t.mock.timers.tick(1000);await flush();assert.equal(frames.length,3,'resume must not multiply the timers');
+});
+
+test('hiding during an editable-region read aborts that read before polling resumes',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const reads=[];let frames=0;
+  const f=await fixture(t,{fetchFrame:async()=>{frames++;return new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}});},observe:({signal})=>new Promise((resolve,reject)=>{
+    reads.push({signal,resolve});signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true});
+  })});
+  assert.equal(reads.length,1);f.document.hidden=true;f.document.fire('visibilitychange');await flush();assert.equal(reads[0].signal.aborted,true);
+  t.mock.timers.tick(30000);await flush();assert.equal(frames,1);assert.equal(reads.length,1);
+  f.document.hidden=false;f.document.fire('visibilitychange');await flush();
+  assert.equal(frames,2);assert.equal(reads.length,2);reads[1].resolve({width:720,height:1560,nodes:[]});await flush();
+});
+
+for(const changed of [false,true])test(`slow editable reads ${changed?'invalidate a changed frame':'retain a stable frame map beyond 2.5 seconds'}`,async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date']});
+  let frames=0,reads=0,finishObserve;
+  const f=await fixture(t,{fetchFrame:async()=>new Response(new Uint8Array([changed?++frames:1]),{headers:{'content-type':'image/png'}}),observe:()=>++reads===1?{width:720,height:1560,nodes:[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]}:new Promise(resolve=>{finishObserve=resolve;})});
+  t.mock.timers.tick(10000);await flush();assert.equal(reads,2);
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement===find(f.mount,'mobile-native-keyboard'),!changed);
+  finishObserve({width:720,height:1560,nodes:[{editable:true,bounds:{left:0,top:0,right:200,bottom:200}}]});await flush();
+  buttonBy(f.mount,'Android 홈').onclick();await flush();
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement,null,'direct input invalidates the old map and late reads cannot restore it');
+});
+
+test('a stalled screen cannot keep an editable map usable indefinitely',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date']});let frames=0;
+  const f=await fixture(t,{fetchFrame:async()=>++frames===1?new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}}):new Promise(()=>{})});
+  t.mock.timers.tick(31000);await flush();assert.equal(frames,2);
+  f.image.fire('pointerdown',{clientX:10,clientY:10});f.image.fire('pointerup',{clientX:10,clientY:10});
+  assert.equal(f.document.activeElement,null);
+});
+
+test('AI work suppresses UI-tree reads and slows frame polling until the task finishes',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});let frames=0;
+  const f=await fixture(t,{busy:true,fetchFrame:async()=>{frames++;return new Response(new Uint8Array([1]),{headers:{'content-type':'image/png'}});}});
+  assert.equal(frames,1);assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,0);
+  t.mock.timers.tick(1000);await flush();assert.equal(frames,1);
+  t.mock.timers.tick(2000);await flush();assert.equal(frames,2);assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,0);
+  f.setBusy(false);t.mock.timers.tick(2500);await flush();
+  t.mock.timers.tick(500);await flush();assert.equal(frames,3);assert.equal(f.requests.filter(request=>request.path.endsWith('/observe')).length,1);
+  t.mock.timers.tick(1000);await flush();assert.equal(frames,4);
+});
+
+for(const [code,meaning] of [['device_operation_timeout',/작업이 지연/],['device_operation_cancelled',/작업이 취소/],['device_queue_timeout',/다른 모바일 작업/]])test(`${code} has actionable Korean UI text`,async t=>{
+  const {mount}=dom(),statuses=[];
+  const view=createMobileWorkspace({mount,roomId:'room-A',api:async()=>{throw Object.assign(new Error('private Android command output'),{code});},onStatus:(message,kind)=>statuses.push({message,kind})});
+  t.after(()=>view.destroy());await flush();
+  assert.match(find(mount,'mobile-screen-message').textContent,meaning);assert.equal(statuses.at(-1).kind,'error');
+  assert.equal(statuses.at(-1).message.includes('private Android command output'),false);
 });
 
 test('explicit Mobile view wakes an allocated sleeping device once after room permissions load',async t=>{

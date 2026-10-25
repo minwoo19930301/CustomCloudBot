@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { configuration, DevicePool, parseUiTree, roomId } from './device-pool.mjs';
+import { configuration, DevicePool, parseUiTree, roomId, runCommand, operationDiagnostic } from './device-pool.mjs';
 import { BROKER_RUNTIME_REVISION, createServer, listenServer } from './service.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
@@ -513,4 +513,188 @@ test('Unix socket listener opens no TCP port and retains bearer authentication',
   const duplicate = createServer(pool, TOKEN);
   await assert.rejects(listenServer(duplicate, { ...config, socket }), /already has a listening service/);
   assert.equal((await request(TOKEN)).status, 200);
+});
+
+test('operator command scaling is bounded and leaves ordinary deployment defaults unchanged', () => {
+  const env = { MOBILE_ANDROID_IMAGE: 'image', MOBILE_BROKER_TOKEN: TOKEN };
+  assert.equal(configuration(env).commandTimeoutScale, 1);
+  assert.equal(configuration(env).operationMs, 45_000);
+  assert.equal(configuration({ ...env, MOBILE_COMMAND_TIMEOUT_SCALE: '3' }).commandTimeoutScale, 3);
+  for (const value of ['0', '4', '1.5', 'NaN', 'Infinity']) assert.throws(() => configuration({ ...env, MOBILE_COMMAND_TIMEOUT_SCALE: value }), /MOBILE_COMMAND_TIMEOUT_SCALE/);
+  for (const value of ['0', '46', '44.5', 'NaN', 'Infinity']) assert.throws(() => configuration({ ...env, MOBILE_OPERATION_SECONDS: value }), /MOBILE_OPERATION_SECONDS/);
+});
+
+function simulatedDelay(advance, options, duration) {
+  advance(Math.min(options.timeout, duration));
+  if (options.timeout < duration) throw Object.assign(new Error('private command contents must not reach diagnostics'), { killed: true, signal: 'SIGTERM' });
+}
+
+test('TCG scaling permits a slow screen, app launch and Unicode input without changing default caps', async t => {
+  for (const scale of [1, 3]) {
+    const { pool, advance, calls } = await fixture(t, { commandTimeoutScale: scale, inputIme: 'com.android.adbkeyboard/.AdbIME' });
+    await pool.wake(A);
+    const previous = pool.run;
+    pool.run = async (file, args, options) => {
+      const result = await previous(file, args, options);
+      const command = args.at(-1);
+      if (args.includes('screencap')) simulatedDelay(advance, options, 11_000);
+      if (file === 'adb' && command.startsWith("'cmd' 'package' 'resolve-activity'")) {
+        simulatedDelay(advance, options, 9_000); return 'com.android.settings/.Settings';
+      }
+      if (file === 'adb' && command.startsWith("'am' 'start'")) simulatedDelay(advance, options, 9_000);
+      if (file === 'adb' && command.startsWith("'ime' 'set'")) simulatedDelay(advance, options, 6_000);
+      if (file === 'adb' && command.startsWith("'am' 'broadcast'")) simulatedDelay(advance, options, 9_000);
+      return result;
+    };
+    if (scale === 1) {
+      for (const action of [() => pool.screenshot(A), () => pool.launch(A, 'com.android.settings'), () => pool.input(A, { type: 'text', text: '한글 검색' })]) {
+        await assert.rejects(action(), error => operationDiagnostic(error).code === 'timeout');
+      }
+    } else {
+      assert.deepEqual(await pool.screenshot(A), png);
+      assert.deepEqual(await pool.launch(A, 'com.android.settings'), { ok: true });
+      assert.deepEqual(await pool.input(A, { type: 'text', text: '한글 검색' }), { ok: true });
+      assert.equal(calls.findLast(item => item.args.includes('screencap')).options.timeout, 30_000);
+      assert.equal(calls.findLast(item => item.args.at(-1).startsWith("'am' 'broadcast'")).options.timeout, 24_000);
+    }
+    assert.equal(pool.devices.get(A).state, 'running');
+  }
+});
+
+test('one operation shares its whole 45-second allowance across commands and does not continue after expiry', async t => {
+  const { pool, advance, calls } = await fixture(t, { commandTimeoutScale: 3 });
+  await pool.wake(A);
+  const previous = pool.run;
+  pool.run = async (file, args, options) => {
+    const result = await previous(file, args, options);
+    if (file === 'adb' && args[0] === 'connect') simulatedDelay(advance, options, 23_000);
+    if (file === 'adb' && args.at(-1).startsWith("'cmd' 'package' 'resolve-activity'")) {
+      assert.equal(options.timeout, 22_000);
+      simulatedDelay(advance, options, 23_000); return 'com.android.settings/.Settings';
+    }
+    return result;
+  };
+  const started = pool.now();
+  await assert.rejects(pool.launch(A, 'com.android.settings'), error => {
+    assert.equal(error.code, 'device_operation_timeout');
+    assert.deepEqual(operationDiagnostic(error), { action: 'launch', stage: 'resolve_activity', code: 'timeout', durationMs: 22_000, operationMs: 45_000 });
+    return true;
+  });
+  assert.equal(pool.now() - started, 45_000);
+  assert.equal(calls.some(item => item.args.at(-1).startsWith("'am' 'start'")), false);
+  assert.equal(pool.devices.get(A).state, 'running');
+});
+
+test('expired queued operations return promptly and never run after the room is unlocked', async t => {
+  const { pool, calls } = await fixture(t, { operationMs: 25 });
+  await pool.wake(A);
+  pool.now = Date.now;
+  let release;
+  const blocker = pool.lock(A, () => new Promise(resolve => { release = resolve; }));
+  await Promise.resolve();
+  const before = calls.length;
+  await assert.rejects(pool.screenshot(A), error => error.code === 'device_operation_timeout' && operationDiagnostic(error).stage === 'queue');
+  release(); await blocker;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, before);
+  assert.equal(pool.depths.has(A), false);
+});
+
+test('client cancellation aborts running work and prevents any following input stage', async t => {
+  const { pool } = await fixture(t);
+  await pool.wake(A);
+  const controller = new AbortController();
+  const previous = pool.run;
+  let connected, aborted, calls = 0;
+  const began = new Promise(resolve => { connected = resolve; });
+  pool.run = async (file, args, options) => {
+    calls++;
+    if (file === 'adb' && args[0] === 'connect') return new Promise((resolve, reject) => {
+      aborted = options.signal;
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      connected();
+    });
+    return previous(file, args, options);
+  };
+  const pending = pool.input(A, { type: 'key', key: 'HOME' }, { signal: controller.signal });
+  await began; controller.abort(new Error('private abort message'));
+  await assert.rejects(pending, { code: 'device_operation_cancelled' });
+  assert.equal(aborted.aborted, true);
+  assert.equal(calls, 2); // inspect and connect; no key injection after disconnect.
+  assert.equal(pool.devices.get(A).state, 'running');
+});
+
+test('execFile receives cancellation and stops a real child before its delayed write', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'ccb-mobile-abort-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ready = path.join(directory, 'ready'), late = path.join(directory, 'late');
+  const controller = new AbortController();
+  const pending = runCommand(process.execPath, ['-e', "const fs=require('fs');fs.writeFileSync(process.argv[1],'ready');setTimeout(()=>fs.writeFileSync(process.argv[2],'unexpected'),300);", ready, late], { signal: controller.signal, timeout: 2000 });
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  const deadline = Date.now() + 1500;
+  while (true) {
+    try { await readFile(ready); break; } catch (error) { if (error.code !== 'ENOENT' || Date.now() > deadline) throw error; }
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  controller.abort(); await rejected;
+  await new Promise(resolve => setTimeout(resolve, 350));
+  await assert.rejects(readFile(late), { code: 'ENOENT' });
+});
+
+test('HTTP failures expose only fixed diagnostics, never command text, input, outputs or arbitrary codes', async t => {
+  const { pool } = await fixture(t, { inputIme: 'com.android.adbkeyboard/.AdbIME' });
+  await pool.wake(A);
+  const secret = 'private-password-and-command-output';
+  const previous = pool.run, logs = [];
+  pool.run = async (file, args, options) => {
+    if (file === 'adb' && args.at(-1).startsWith("'am' 'broadcast'")) throw Object.assign(new Error(secret), { code: secret, stdout: secret, stderr: secret, cmd: secret });
+    return previous(file, args, options);
+  };
+  const server = createServer(pool, TOKEN, { logFailure: entry => logs.push(entry) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/devices/${A}/input`, {
+    method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'text', text: secret }),
+  });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'device_operation_failed', message: 'The mobile operation could not be completed.' });
+  assert.equal(logs.length, 1);
+  assert.deepEqual(Object.keys(logs[0]).sort(), ['action', 'code', 'durationMs', 'event', 'operationMs', 'requestMs', 'stage']);
+  assert.equal(logs[0].action, 'input'); assert.equal(logs[0].stage, 'send_input'); assert.equal(logs[0].code, 'command_failed');
+  assert.equal(JSON.stringify(logs).includes(secret), false);
+  assert.equal(JSON.stringify(logs).includes(A), false);
+});
+
+test('closing the HTTP connection cancels the guest operation signal', async t => {
+  let began, ended;
+  const start = new Promise(resolve => { began = resolve; });
+  const end = new Promise(resolve => { ended = resolve; });
+  const pool = { screenshot: async (room, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => { ended(); reject(new Error('private disconnected request')); }, { once: true });
+    began();
+  }) };
+  const server = createServer(pool, TOKEN, { logFailure: () => {} });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const request = http.get(`http://127.0.0.1:${server.address().port}/devices/${A}/screenshot`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  request.on('error', () => {});
+  await start; request.destroy();
+  await Promise.race([end, new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('Disconnect did not cancel guest work')), 1000); timer.unref(); })]);
+});
+
+test('invalid screen data and child output limits have distinct safe diagnostic stages', async t => {
+  const { pool } = await fixture(t);
+  await pool.wake(A);
+  const previous = pool.run;
+  let outputLimit = false;
+  pool.run = async (file, args, options) => {
+    if (args.includes('screencap')) {
+      if (outputLimit) throw Object.assign(new Error('private output sample'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true, stdout: 'private output sample' });
+      return Buffer.from('private invalid screen contents');
+    }
+    return previous(file, args, options);
+  };
+  await assert.rejects(pool.screenshot(A), error => error.code === 'device_screen_unavailable' && operationDiagnostic(error).stage === 'validate_screen');
+  outputLimit = true;
+  await assert.rejects(pool.screenshot(A), error => operationDiagnostic(error).stage === 'screencap' && operationDiagnostic(error).code === 'output_limit');
 });

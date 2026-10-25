@@ -86,16 +86,17 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
   const chatState=node(document,'div','','mobile-chat-state');chatState.setAttribute('role','status');
   const form=node(document,'form',undefined,'mobile-chat-form'),input=node(document,'textarea',undefined,'mobile-chat-input'),submit=button(document,'이 대화의 AI에게 보내기','↑');submit.type='submit';input.rows=2;input.maxLength=12000;input.value=draft.value||'';input.placeholder='이 모바일에서 무엇을 할까요?';input.setAttribute('aria-label','이 대화의 AI에게 요청');form.append(input,submit);
   scroller.append(screen,navigation,transcript);root.append(toolbar,scroller,chatState,form);mount.replaceChildren(root);
-  let disposed=false,running=false,keyboardWarning=false,frameReady=false,readOnly=false,sending=false,operating=false,chatReady=false,width=720,height=1560,frameUrl=null,regions=[],regionsAt=0,frameBusy=false,statusBusy=false,observeBusy=false,chatBusy=false,screenEpoch=0,regionRevision=0,statusReady=false,connectionUnavailable=false,deviceState='unallocated',initialWakeAttempted=false,pointer=null,wheelAt=0,expanded=false,inputQueue=Promise.resolve(),chatVersion='',draftRevision=draft.revision||0;
-  const timers=new Set(),listeners=[];
+  let disposed=false,running=false,keyboardWarning=false,frameReady=false,readOnly=false,sending=false,operating=false,chatReady=false,width=720,height=1560,frameUrl=null,frameBytes=null,lastFrameAt=0,regions=[],aiBusy=false,screenBusy=false,screenAbort=null,statusBusy=false,chatBusy=false,screenEpoch=0,regionRevision=0,statusReady=false,connectionUnavailable=false,deviceState='unallocated',initialWakeAttempted=false,pointer=null,wheelAt=0,expanded=false,inputQueue=Promise.resolve(),chatVersion='',draftRevision=draft.revision||0;
+  const timers=new Map(),listeners=[];
   const active=()=>!disposed&&!abort.signal.aborted&&!document.hidden;
-  const schedule=(fn,delay)=>{if(!active())return;const timer=setTimeout(()=>{timers.delete(timer);if(active())void fn();},delay);timers.add(timer);};
+  const schedule=(fn,delay)=>{if(!active())return;clearTimeout(timers.get(fn));const timer=setTimeout(()=>{timers.delete(fn);if(active())void fn();},delay);timers.set(fn,timer);};
+  const clearTimers=()=>{for(const timer of timers.values())clearTimeout(timer);timers.clear();};
   const listen=(target,type,handler,options)=>{target.addEventListener(type,handler,options);listeners.push(()=>target.removeEventListener(type,handler,options));};
-  const errorMessage=error=>({MOBILE_NOT_CONFIGURED:'모바일 기기가 아직 연결되지 않았습니다. 서버의 Android 설정이 필요합니다.',MOBILE_CONFIG_INVALID:'모바일 서버 연결 설정을 확인해주세요.',MOBILE_AUTH_FAILED:'모바일 서버 연결 인증을 확인해주세요.',MOBILE_UNAVAILABLE:'모바일 서버에 연결할 수 없습니다. 잠시 후 다시 연결해주세요.',MOBILE_TIMEOUT:'기기를 준비하는 데 시간이 걸리고 있습니다. 잠시 후 다시 연결해주세요.',MOBILE_PREPARING:'Android를 준비하고 있습니다. 준비가 끝나면 이 화면에서 이어집니다.',device_capacity_busy:'다른 모바일이 실행 중입니다. 한 대를 휴면하거나 작업이 끝난 뒤 깨워주세요.',device_slots_full:'저장할 수 있는 모바일 수를 채웠습니다.',device_busy:'AI가 이 모바일에서 작업 중입니다. 작업이 끝나면 휴면할 수 있습니다.',device_sleeping:'모바일이 휴면 중입니다. 깨우기를 눌러주세요.',vm_boot_timeout:'모바일 가상 컴퓨터를 시작하지 못했습니다. 다시 깨워주세요.',device_boot_timeout:'Android 준비가 완료되지 않았습니다. 다시 깨워주세요.',device_keyboard_timeout:'키보드 연결이 지연되고 있습니다. 다시 연결해 주세요.',vm_start_failed:'모바일을 시작하지 못했습니다. 서버 실행 환경을 확인해주세요.',vm_stop_failed:'이전 모바일이 종료되는 중입니다. 잠시 후 다시 깨워주세요.',vm_recovery_required:'모바일 서버가 다시 시작되었습니다. 깨우기를 눌러 이어주세요.',text_unicode_unsupported:'이 모바일의 키보드가 해당 문자를 아직 지원하지 않습니다.'}[error?.code]||error?.message||'연결하지 못했습니다. 다시 시도해주세요.');
+  const errorMessage=error=>({MOBILE_NOT_CONFIGURED:'모바일 기기가 아직 연결되지 않았습니다. 서버의 Android 설정이 필요합니다.',MOBILE_CONFIG_INVALID:'모바일 서버 연결 설정을 확인해주세요.',MOBILE_AUTH_FAILED:'모바일 서버 연결 인증을 확인해주세요.',MOBILE_UNAVAILABLE:'모바일 서버에 연결할 수 없습니다. 잠시 후 다시 연결해주세요.',MOBILE_TIMEOUT:'기기를 준비하는 데 시간이 걸리고 있습니다. 잠시 후 다시 연결해주세요.',MOBILE_PREPARING:'Android를 준비하고 있습니다. 준비가 끝나면 이 화면에서 이어집니다.',device_capacity_busy:'다른 모바일이 실행 중입니다. 한 대를 휴면하거나 작업이 끝난 뒤 깨워주세요.',device_slots_full:'저장할 수 있는 모바일 수를 채웠습니다.',device_queue_timeout:'다른 모바일 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.',device_operation_timeout:'Android 작업이 지연되고 있습니다. 화면을 확인한 뒤 다시 시도해 주세요.',device_operation_cancelled:'Android 작업이 취소되었습니다. 화면을 확인한 뒤 다시 시도해 주세요.',guest_request_timeout:'Android 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요.',guest_connection_failed:'Android 연결이 끊겼습니다. 상태를 확인한 뒤 다시 연결해 주세요.',guest_operation_failed:'Android 작업을 완료하지 못했습니다. 화면을 확인한 뒤 다시 시도해 주세요.',device_operation_failed:'Android 작업을 완료하지 못했습니다. 화면을 확인한 뒤 다시 시도해 주세요.',device_busy:'AI가 이 모바일에서 작업 중입니다. 작업이 끝나면 휴면할 수 있습니다.',device_sleeping:'모바일이 휴면 중입니다. 깨우기를 눌러주세요.',vm_boot_timeout:'모바일 가상 컴퓨터를 시작하지 못했습니다. 다시 깨워주세요.',device_boot_timeout:'Android 준비가 완료되지 않았습니다. 다시 깨워주세요.',device_keyboard_timeout:'키보드 연결이 지연되고 있습니다. 다시 연결해 주세요.',vm_start_failed:'모바일을 시작하지 못했습니다. 서버 실행 환경을 확인해주세요.',vm_stop_failed:'이전 모바일이 종료되는 중입니다. 잠시 후 다시 깨워주세요.',vm_recovery_required:'모바일 서버가 다시 시작되었습니다. 깨우기를 눌러 이어주세요.',text_unicode_unsupported:'이 모바일의 키보드가 해당 문자를 아직 지원하지 않습니다.'}[error?.code]||error?.message||'연결하지 못했습니다. 다시 시도해주세요.');
   const error=error=>{if(active()&&error?.name!=='AbortError')onStatus(errorMessage(error),error?.code==='MOBILE_NOT_CONFIGURED'?'':'error');};
   const preparing=()=>['starting','booting'].includes(deviceState);
   const refreshControls=()=>{expand.disabled=!running||!frameReady;wake.textContent=keyboardWarning?'키보드 다시 연결':'깨우기';wake.setAttribute('aria-label',keyboardWarning?'키보드 다시 연결':'모바일 깨우기');wake.disabled=!active()||connectionUnavailable||operating||preparing()||(running&&!keyboardWarning)||readOnly;sleep.disabled=!active()||connectionUnavailable||operating||!running||readOnly;for(const control of [back,home,recent])control.disabled=!active()||!running||operating||readOnly;input.readOnly=readOnly;input.disabled=!mobileChat?.send||!chatReady;submit.disabled=!mobileChat?.send||!chatReady||readOnly||sending||draft.pending||!input.value.trim();image.setAttribute('aria-disabled',String(!running||readOnly));};
-  const invalidateRegions=()=>{regions=[];regionsAt=0;regionRevision++;};
+  const invalidateRegions=()=>{regions=[];regionRevision++;};
   const tryAutoWake=()=>{if(!active()||!statusReady||!chatReady||readOnly||initialWakeAttempted)return;initialWakeAttempted=true;if(['sleeping','stopped','unallocated','unassigned'].includes(deviceState))void power('wake');};
   const sendAction=action=>{
     if(!action||!active()||!running||readOnly||operating)return Promise.resolve();
@@ -104,26 +105,40 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
     return inputQueue;
   };
   const keyboard=createMobileKeyboard({viewport:screen,send:sendAction,canInput:()=>active()&&running&&!readOnly&&!operating,onChange:onKeyboard});
-  const revokeFrame=()=>{if(frameUrl)URL.revokeObjectURL(frameUrl);frameUrl=null;frameReady=false;image.removeAttribute('src');image.hidden=true;};
-  async function frame() {
-    if(frameBusy||!active()||!running)return;frameBusy=true;const epoch=screenEpoch;
-    try{const blob=await screenshotBlob(base+'/screenshot',abort.signal);if(!active()||!running||epoch!==screenEpoch)return;const next=URL.createObjectURL(blob),previous=frameUrl;frameUrl=next;image.src=next;if(previous)URL.revokeObjectURL(previous);}
-    catch(cause){if(active()&&!frameReady){screenMessage.hidden=false;screenMessage.textContent=errorMessage(cause);}error(cause);}finally{frameBusy=false;if(active()&&running)schedule(frame,1000);}
+  const revokeFrame=()=>{if(frameUrl)URL.revokeObjectURL(frameUrl);frameUrl=null;frameBytes=null;lastFrameAt=0;frameReady=false;image.removeAttribute('src');image.hidden=true;};
+  async function frame(readSignal,epoch) {
+    try{const blob=await screenshotBlob(base+'/screenshot',readSignal),bytes=new Uint8Array(await blob.arrayBuffer());if(readSignal.aborted||!active()||!running||epoch!==screenEpoch)return false;
+      // Compare bounded image bytes: stable frames keep their editable map, while
+      // any screen change invalidates it before the next Android UI-tree read.
+      if(!frameBytes||frameBytes.length!==bytes.length||!frameBytes.every((value,index)=>value===bytes[index]))invalidateRegions();
+      frameBytes=bytes;lastFrameAt=Date.now();const next=URL.createObjectURL(blob),previous=frameUrl;frameUrl=next;image.src=next;if(previous)URL.revokeObjectURL(previous);return true;}
+    catch(cause){if(!readSignal.aborted&&active()&&epoch===screenEpoch){if(!frameReady){screenMessage.hidden=false;screenMessage.textContent=errorMessage(cause);}error(cause);}return false;}
   }
-  async function observe() {
-    if(observeBusy||!active()||!running)return;observeBusy=true;const epoch=screenEpoch,revision=regionRevision;
-    try{const data=await api(base+'/observe',{signal:abort.signal});if(!active()||!running||epoch!==screenEpoch||revision!==regionRevision)return;if(Number.isFinite(data.width)&&data.width>0)width=data.width;if(Number.isFinite(data.height)&&data.height>0)height=data.height;regions=mobileEditableRegions(data);regionsAt=Date.now();}
-    catch{invalidateRegions();}finally{observeBusy=false;if(active()&&running)schedule(observe,1500);}
+  async function observe(readSignal,epoch) {
+    const revision=regionRevision;
+    try{const data=await api(base+'/observe',{signal:readSignal});if(readSignal.aborted||!active()||!running||epoch!==screenEpoch||revision!==regionRevision)return;if(Number.isFinite(data.width)&&data.width>0)width=data.width;if(Number.isFinite(data.height)&&data.height>0)height=data.height;regions=mobileEditableRegions(data);}
+    catch{if(epoch===screenEpoch)invalidateRegions();}
   }
+  // The Android broker serializes device operations. One completion-driven loop
+  // avoids queuing a second expensive screen read while the first is still busy.
+  async function pollScreen() {
+    if(screenBusy||!active()||!running||operating)return;
+    clearTimeout(timers.get(pollScreen));timers.delete(pollScreen);
+    screenBusy=true;const controller=new AbortController(),epoch=screenEpoch;screenAbort=controller;
+    const cancel=()=>controller.abort();abort.signal.addEventListener('abort',cancel,{once:true});
+    try{if(await frame(controller.signal,epoch)&&!controller.signal.aborted&&active()&&running&&!operating&&!aiBusy&&epoch===screenEpoch)await observe(controller.signal,epoch);}
+    finally{abort.signal.removeEventListener('abort',cancel);screenBusy=false;if(screenAbort===controller)screenAbort=null;if(active()&&running&&!operating)schedule(pollScreen,aiBusy?3000:1000);}
+  }
+  const requestScreen=()=>{if(!screenBusy&&!timers.has(pollScreen))void pollScreen();};
   function applyStatus(data) {
-    const device=data.device||data,state=device.state||device.status||'unassigned',wasRunning=running;running=state==='running';keyboardWarning=running&&device.lastError==='device_keyboard_timeout';deviceState=state;statusReady=true;
+    const device=data.device||data,state=device.state||device.status||'unassigned';running=state==='running';keyboardWarning=running&&device.lastError==='device_keyboard_timeout';deviceState=state;statusReady=true;
     readOnly=Boolean(data.readOnly??readOnly);if(device.width>0)width=device.width;if(device.height>0)height=device.height;
     const counts=data.capacity||data;capacity.textContent=Number.isFinite(counts.running)?`${counts.running} / ${counts.maxRunning||2} 실행 중`:'';
     deviceLabel.textContent=device.name||'Android';root.dataset.state=state;
     const startingMessage='이 대화의 Android를 준비하는 중… 처음에는 몇 분 걸릴 수 있습니다.';
     const messages={unallocated:'이 대화에 사용할 모바일을 깨워주세요.',error:'모바일 기기를 시작하지 못했습니다. 다시 깨워주세요.',running:frameReady?'Android 연결됨':'Android 화면을 불러오는 중…',starting:startingMessage,booting:startingMessage,sleeping:'기기가 휴면 중입니다. 깨우면 앱과 파일이 그대로 이어집니다.',stopped:'기기가 휴면 중입니다. 깨우면 앱과 파일이 그대로 이어집니다.',unassigned:'이 대화에 사용할 모바일을 깨워주세요.',unavailable:'모바일 서버가 아직 연결되지 않았습니다.'};
     const message=keyboardWarning||state==='error'&&device.lastError?errorMessage({code:device.lastError}):messages[state]||'모바일 상태를 확인해주세요.';screenMessage.textContent=message;screenMessage.hidden=running&&frameReady;
-    if(!running){screenEpoch++;keyboard.deactivate();invalidateRegions();revokeFrame();}else if(!wasRunning){void frame();void observe();}
+    if(!running){screenEpoch++;screenAbort?.abort();keyboard.deactivate();invalidateRegions();revokeFrame();}else requestScreen();
     onStatus(message,keyboardWarning?'warning':running&&frameReady?'ready':state==='error'?'error':'');refreshControls();tryAutoWake();
   }
   async function status() {
@@ -133,14 +148,14 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
     finally{statusBusy=false;if(active()&&!connectionUnavailable)schedule(status,5000);}
   }
   async function power(operation) {
-    if(operating||!active()||readOnly||operation==='wake'&&preparing())return;operating=true;screenEpoch++;pointer=null;keyboard.deactivate();invalidateRegions();refreshControls();
+    if(operating||!active()||readOnly||operation==='wake'&&preparing())return;operating=true;screenEpoch++;screenAbort?.abort();pointer=null;keyboard.deactivate();invalidateRegions();refreshControls();
     try{await inputQueue;if(!active())return;const data=await api(base+'/'+operation,{method:'POST',body:'{}',signal:abort.signal});if(active())applyStatus(data);}
     catch(cause){error(cause);}finally{operating=false;refreshControls();if(active())void status();}
   }
   const point=event=>mobileFramePoint(image.getBoundingClientRect(),width,height,event.clientX,event.clientY);
   listen(image,'pointerdown',event=>{if(event.button!==0||!running||readOnly||operating||!active()||pointer)return;const start=point(event);if(!start)return;event.preventDefault();keyboard.flush();pointer={id:event.pointerId,start,last:start,time:Date.now(),clientX:event.clientX,clientY:event.clientY,moved:false};image.setPointerCapture?.(event.pointerId);});
   listen(image,'pointermove',event=>{if(!pointer||pointer.id!==event.pointerId)return;pointer.moved||=Math.hypot(event.clientX-pointer.clientX,event.clientY-pointer.clientY)>8;pointer.last=point(event)||pointer.last;if(pointer.moved)invalidateRegions();});
-  const endPointer=(event,cancelled=false)=>{if(!pointer||pointer.id!==event.pointerId)return;const gesture=pointer;pointer=null;try{image.releasePointerCapture?.(event.pointerId);}catch{}const action=mobileGesture(gesture.start,point(event)||gesture.last,{elapsed:Date.now()-gesture.time,moved:gesture.moved,cancelled});const editable=action?.type==='tap'&&Date.now()-regionsAt<2500?mobileEditableAt(gesture.start,regions):null;if(action)void sendAction(action);if(editable)keyboard.focus(editable);else keyboard.deactivate();};
+  const endPointer=(event,cancelled=false)=>{if(!pointer||pointer.id!==event.pointerId)return;const gesture=pointer;pointer=null;try{image.releasePointerCapture?.(event.pointerId);}catch{}const action=mobileGesture(gesture.start,point(event)||gesture.last,{elapsed:Date.now()-gesture.time,moved:gesture.moved,cancelled});const editable=action?.type==='tap'&&Date.now()-lastFrameAt<30000?mobileEditableAt(gesture.start,regions):null;if(action)void sendAction(action);if(editable)keyboard.focus(editable);else keyboard.deactivate();};
   listen(image,'pointerup',event=>endPointer(event));listen(image,'pointercancel',event=>endPointer(event,true));listen(image,'lostpointercapture',()=>{pointer=null;});
   listen(image,'wheel',event=>{const target=point(event);if(!target||!running||readOnly||!active())return;event.preventDefault();keyboard.deactivate();if(Date.now()-wheelAt<250)return;wheelAt=Date.now();void sendAction(mobileWheel(target,event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?height:1),width,height));},{passive:false});
   listen(image,'contextmenu',event=>event.preventDefault());listen(image,'load',()=>{if(active()&&running&&frameUrl&&image.naturalWidth>0&&image.naturalHeight>0){width=image.naturalWidth;height=image.naturalHeight;frameReady=true;image.hidden=false;screenMessage.hidden=true;onStatus(keyboardWarning?errorMessage({code:'device_keyboard_timeout'}):'Android 연결됨',keyboardWarning?'warning':'ready');refreshControls();}});
@@ -152,7 +167,7 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
   const saveDraft=()=>{draft.value=input.value;draft.revision=(draft.revision||0)+1;draftRevision=draft.revision;refreshControls();};
   async function chat() {
     if(chatBusy||!active()||!mobileChat?.load)return;chatBusy=true;
-    try{const data=await mobileChat.load(roomId,{signal:abort.signal});if(!active())return;syncDraft();chatReady=true;readOnly=!!data.readOnly;const messages=(Array.isArray(data.messages)?data.messages:[]).slice(-50),version=JSON.stringify(messages);
+    try{const data=await mobileChat.load(roomId,{signal:abort.signal});if(!active())return;syncDraft();chatReady=true;readOnly=!!data.readOnly;if(Boolean(data.busy)!==aiBusy){aiBusy=Boolean(data.busy);invalidateRegions();}const messages=(Array.isArray(data.messages)?data.messages:[]).slice(-50),version=JSON.stringify(messages);
       if(version!==chatVersion){const stick=chatVersion!==''&&scroller.scrollHeight-scroller.clientHeight-scroller.scrollTop<60;chatVersion=version;transcript.replaceChildren();for(const message of messages){const content=typeof message.content==='string'?message.content:typeof message.text==='string'?message.text:'';if(!content)continue;const row=node(document,'div',undefined,'mobile-chat-message');const role=message.role||(message.kind==='human'?'user':message.kind==='bot'?'assistant':'system');row.dataset.role=role;const author=node(document,'small',message.authorName||message.author||(role==='user'?'나':role==='assistant'?'AI':'알림')),text=node(document,'p',content);row.append(author,text);transcript.append(row);}if(stick)scroller.scrollTop=scroller.scrollHeight;}
       chatState.textContent=readOnly?'가지치기한 원본입니다. 새 가지에서 요청해주세요.':data.busy?'AI가 작업 중입니다. 추가 요청은 같은 대화에 이어집니다.':'';if(readOnly)keyboard.deactivate();refreshControls();tryAutoWake();
     }catch(cause){if(active())chatState.textContent=errorMessage(cause);}finally{chatBusy=false;if(active())schedule(chat,2500);}
@@ -162,7 +177,8 @@ export function createMobileWorkspace({mount,api,roomId,signal,mobileChat,draft=
     try{await mobileChat.send(roomId,content);if((draft.value||'').trim()===content){draft.value='';draft.revision=(draft.revision||0)+1;}if(!active())return;syncDraft();await chat();}
     catch(cause){if(active())chatState.textContent=errorMessage(cause);}finally{sending=false;draft.pending=false;if(active())refreshControls();}
   };
-  function destroy() {if(disposed)return;disposed=true;abort.abort();for(const timer of timers)clearTimeout(timer);timers.clear();for(const remove of listeners)remove();signal?.removeEventListener('abort',destroy);keyboard.destroy();revokeFrame();pointer=null;root.remove();}
+  listen(document,'visibilitychange',()=>{if(!active()){clearTimers();screenEpoch++;screenAbort?.abort();pointer=null;keyboard.deactivate();invalidateRegions();}else{void status();void chat();}refreshControls();});
+  function destroy() {if(disposed)return;disposed=true;abort.abort();clearTimers();for(const remove of listeners)remove();signal?.removeEventListener('abort',destroy);keyboard.destroy();revokeFrame();pointer=null;root.remove();}
   if(signal?.aborted)destroy();else{signal?.addEventListener('abort',destroy,{once:true});refreshControls();void status();void chat();}
   return {destroy};
 }

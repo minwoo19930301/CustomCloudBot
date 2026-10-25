@@ -141,6 +141,17 @@ QEMU startup. The configuration was therefore extended to
 `MOBILE_VM_BOOT_SECONDS=600`, overriding the code's 180-second default. The updated
 instance seed also sets the guest's separate Android boot deadline to
 `MOBILE_BOOT_SECONDS=600`; align the host pool's Android wait budget with it.
+
+The TCG instance seed sets `MOBILE_COMMAND_TIMEOUT_SCALE=3` and
+`MOBILE_OPERATION_SECONDS=45`. The ordinary broker default keeps the original
+command caps (scale 1); the allowed operator scale is 1–3. Screenshot, observation,
+input and app launch share one 45-second budget including queue wait, with each
+command capped to the remaining time. Configure the host request budget to 60
+seconds and the app request budget to 90 seconds. Disconnecting a request cancels
+its pending or running ADB work; already-applied Android input is not rolled back
+or automatically repeated. Safe failure logs contain only a fixed action, stage,
+failure class and elapsed times, never command arguments or captured output.
+
 HTTP availability alone does not
 prove Android is ready. Both guest boot and Android readiness happen in
 the background; the private wake HTTP response is prompt and reports `starting`.

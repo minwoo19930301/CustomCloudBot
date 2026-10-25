@@ -10,6 +10,16 @@ const KEY_CODES = Object.freeze({ BACK: 4, HOME: 3, APP_SWITCH: 187, ENTER: 66, 
 const OWNER_LABEL = 'org.customcloudbot.mobile';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const integer = (value, low, high) => Number.isInteger(value) && value >= low && value <= high;
+const diagnostics = new WeakMap();
+export const operationDiagnostic = error => diagnostics.get(error);
+const failureKind = error => {
+  if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'output_limit';
+  if (error?.code === 'device_operation_cancelled' || error?.name === 'AbortError') return 'cancelled';
+  if (error?.code === 'device_operation_timeout' || error?.killed || error?.code === 'ETIMEDOUT') return 'timeout';
+  if (['ENOENT', 'EACCES', 'EPERM'].includes(error?.code)) return 'spawn_failed';
+  if (Number.isInteger(error?.code) && error.code >= 0 && error.code <= 255) return `exit_${error.code}`;
+  return error instanceof MobileError ? 'device_error' : 'command_failed';
+};
 const shellQuote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
 
 export class MobileError extends Error {
@@ -60,6 +70,8 @@ export function configuration(env = process.env) {
     idleMs: envInt(env, 'MOBILE_IDLE_SECONDS', 600, 60, 86400) * 1000,
     leaseMs: envInt(env, 'MOBILE_LEASE_SECONDS', 120, 30, 600) * 1000,
     bootMs: envInt(env, 'MOBILE_BOOT_SECONDS', 90, 10, 600) * 1000,
+    commandTimeoutScale: envInt(env, 'MOBILE_COMMAND_TIMEOUT_SCALE', 1, 1, 3),
+    operationMs: envInt(env, 'MOBILE_OPERATION_SECONDS', 45, 5, 45) * 1000,
     memoryMb: envInt(env, 'MOBILE_MEMORY_MB', 3072, 512, 32768),
     cpus: envInt(env, 'MOBILE_CPUS', 2, 1, 16),
     privileged: env.MOBILE_DOCKER_PRIVILEGED === 'true',
@@ -68,7 +80,7 @@ export function configuration(env = process.env) {
 }
 
 export async function runCommand(file, args, options = {}) {
-  const result = await execFileAsync(file, args, { timeout: options.timeout || 15_000, maxBuffer: options.maxBuffer || 5 * 1024 * 1024, encoding: options.binary ? 'buffer' : 'utf8', windowsHide: true });
+  const result = await execFileAsync(file, args, { timeout: options.timeout || 15_000, maxBuffer: options.maxBuffer || 5 * 1024 * 1024, encoding: options.binary ? 'buffer' : 'utf8', windowsHide: true, signal: options.signal });
   return result.stdout;
 }
 
@@ -143,6 +155,54 @@ export class DevicePool {
     return pending;
   }
 
+  operation(id, action, execute, { signal } = {}) {
+    const started = this.now(), controller = new AbortController();
+    const budget = this.config.operationMs ?? 45_000;
+    const deadline = started + budget;
+    let stage = 'queue', stageStarted = started, rejectAborted;
+    const annotate = error => {
+      if (error && typeof error === 'object' && !diagnostics.has(error)) diagnostics.set(error, {
+        action, stage, code: failureKind(error), durationMs: Math.max(0, this.now() - stageStarted),
+        operationMs: Math.max(0, this.now() - started),
+      });
+      return error;
+    };
+    const aborted = new Promise((resolve, reject) => { rejectAborted = reject; });
+    const stop = timeout => {
+      if (controller.signal.aborted) return;
+      const error = annotate(timeout
+        ? new MobileError('device_operation_timeout', 'The mobile operation took too long. Try again.', 504)
+        : new MobileError('device_operation_cancelled', 'The mobile operation was cancelled.', 409));
+      controller.abort(error); rejectAborted(error);
+    };
+    const check = () => {
+      if (!controller.signal.aborted && this.now() >= deadline) stop(true);
+      if (controller.signal.aborted) throw controller.signal.reason;
+    };
+    const context = {
+      step: async (name, callback, maximum = 15_000) => {
+        check(); stage = name; stageStarted = this.now();
+        try {
+          const result = await callback({ signal: controller.signal, timeout: Math.max(1, Math.min(maximum * (this.config.commandTimeoutScale ?? 1), deadline - this.now())) });
+          check(); return result;
+        } catch (error) {
+          if (!controller.signal.aborted && this.now() >= deadline) stop(true);
+          throw annotate(controller.signal.aborted ? controller.signal.reason : error);
+        }
+      },
+    };
+    const onAbort = () => stop(false);
+    const timer = setTimeout(() => stop(true), budget);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) stop(false);
+    const pending = this.lock(id, async () => { check(); return execute(context); });
+    // Keep the room lock until an aborted child has exited; a queued operation
+    // that expired must not run later when an earlier request finally settles.
+    return Promise.race([pending, aborted]).catch(error => { throw annotate(error); }).finally(() => {
+      clearTimeout(timer); signal?.removeEventListener('abort', onAbort);
+    });
+  }
+
   exclusive(operation) {
     const pending = this.globalLock.catch(() => {}).then(operation);
     this.globalLock = pending;
@@ -160,10 +220,11 @@ export class DevicePool {
     return pending;
   }
 
-  async inspect(name, expectedRoom) {
+  async inspect(name, expectedRoom, options = {}) {
     let data;
-    try { data = JSON.parse(await this.run('docker', ['inspect', name], { maxBuffer: 256 * 1024 }))[0]; }
+    try { data = JSON.parse(await this.run('docker', ['inspect', name], { ...options, maxBuffer: 256 * 1024 }))[0]; }
     catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason;
       if (/No such (?:object|container)/i.test(String(error.stderr || error.message))) return null;
       throw new MobileError('device_runtime_unavailable', 'The Android runtime could not be inspected.', 503);
     }
@@ -221,8 +282,8 @@ export class DevicePool {
     return this.adb(device, ['shell', args.map(shellQuote).join(' ')], options);
   }
 
-  async connect(device, { timeout = 8000 } = {}) {
-    await this.run('adb', ['connect', this.serial(device)], { timeout });
+  async connect(device, { timeout = 8000, signal } = {}) {
+    await this.run('adb', ['connect', this.serial(device)], { timeout, signal });
   }
 
   async ready(device) {
@@ -328,10 +389,10 @@ export class DevicePool {
     }
   }
 
-  async activeDevice(id) {
+  async activeDevice(id, options) {
     const device = this.devices.get(id);
     if (!device) throw new MobileError('device_sleeping', 'Open or wake this mobile device first.', 409);
-    const info = await this.inspect(this.name(device), id);
+    const info = await this.inspect(this.name(device), id, options);
     if (!info?.State?.Running) { device.state = 'sleeping'; device.leaseExpiresAt = 0; await this.persist(); throw new MobileError('device_sleeping', 'Open or wake this mobile device first.', 409); }
     if (device.state !== 'running') throw new MobileError('device_starting', 'The mobile device is still starting.', 409);
     device.lastActiveAt = this.now();
@@ -348,50 +409,53 @@ export class DevicePool {
     });
   }
 
-  async dimensions(device) {
-    const output = String(await this.shell(device, ['wm', 'size'], { timeout: 5000 }));
+  async dimensions(device, context) {
+    const step = context?.step || ((name, callback, timeout) => callback({ timeout }));
+    const output = String(await step('display_size', options => this.shell(device, ['wm', 'size'], options), 5000));
     const matches = [...output.matchAll(/(?:Physical|Override) size:\s*(\d+)x(\d+)/g)];
     const match = matches.at(-1);
     if (!match || !integer(Number(match[1]), 1, 8192) || !integer(Number(match[2]), 1, 8192)) throw new MobileError('device_display_unavailable', 'Android display dimensions are unavailable.', 503);
     const width = Number(match[1]), height = Number(match[2]);
     // wm reports the panel's natural orientation; touch coordinates follow rotation.
-    const inputState = String(await this.shell(device, ['dumpsys', 'input'], { timeout: 5000, maxBuffer: 1024 * 1024 }));
+    const inputState = String(await step('display_rotation', options => this.shell(device, ['dumpsys', 'input'], { ...options, maxBuffer: 1024 * 1024 }), 5000));
     const orientation = /SurfaceOrientation:\s*([0-3])/.exec(inputState) || /displayId=0[^\n]*orientation=([0-3])/.exec(inputState);
     return orientation && Number(orientation[1]) % 2 ? { width: height, height: width } : { width, height };
   }
 
-  async screenshot(rawId) {
+  async screenshot(rawId, options) {
     const id = roomId(rawId);
-    return this.lock(id, async () => {
-      const device = await this.activeDevice(id);
-      await this.connect(device);
-      const bytes = Buffer.from(await this.adb(device, ['exec-out', 'screencap', '-p'], { binary: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }));
-      if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new MobileError('device_screen_unavailable', 'Android did not return a valid screenshot.', 503);
+    return this.operation(id, 'screenshot', async context => {
+      const device = await context.step('inspect', options => this.activeDevice(id, options));
+      await context.step('connect', options => this.connect(device, options), 8000);
+      const bytes = Buffer.from(await context.step('screencap', options => this.adb(device, ['exec-out', 'screencap', '-p'], { ...options, binary: true, maxBuffer: 16 * 1024 * 1024 }), 10_000));
+      await context.step('validate_screen', () => {
+        if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new MobileError('device_screen_unavailable', 'Android did not return a valid screenshot.', 503);
+      });
       return bytes;
-    });
+    }, options);
   }
 
-  async observe(rawId) {
+  async observe(rawId, options) {
     const id = roomId(rawId);
-    return this.lock(id, async () => {
-      const device = await this.activeDevice(id);
-      await this.connect(device);
-      const { width, height } = await this.dimensions(device);
-      await this.shell(device, ['uiautomator', 'dump', '--compressed', '/data/local/tmp/ccb-window.xml'], { timeout: 12_000 });
-      const xml = await this.adb(device, ['exec-out', 'cat', '/data/local/tmp/ccb-window.xml'], { timeout: 5000, maxBuffer: 2 * 1024 * 1024 });
+    return this.operation(id, 'observe', async context => {
+      const device = await context.step('inspect', options => this.activeDevice(id, options));
+      await context.step('connect', options => this.connect(device, options), 8000);
+      const { width, height } = await this.dimensions(device, context);
+      await context.step('dump_ui', options => this.shell(device, ['uiautomator', 'dump', '--compressed', '/data/local/tmp/ccb-window.xml'], options), 12_000);
+      const xml = await context.step('read_ui', options => this.adb(device, ['exec-out', 'cat', '/data/local/tmp/ccb-window.xml'], { ...options, maxBuffer: 2 * 1024 * 1024 }), 5000);
       return parseUiTree(xml, width, height);
-    });
+    }, options);
   }
 
-  async input(rawId, input) {
+  async input(rawId, input, options) {
     const id = roomId(rawId);
     if (!input || typeof input !== 'object') throw new MobileError('invalid_input', 'Input details are required.');
-    return this.lock(id, async () => {
-      const device = await this.activeDevice(id);
-      await this.connect(device);
+    return this.operation(id, 'input', async context => {
+      const device = await context.step('inspect', options => this.activeDevice(id, options));
+      await context.step('connect', options => this.connect(device, options), 8000);
       let args;
       if (input.type === 'tap' || input.type === 'swipe') {
-        const { width, height } = await this.dimensions(device);
+        const { width, height } = await this.dimensions(device, context);
         const point = (x, y) => integer(x, 0, width - 1) && integer(y, 0, height - 1);
         if (input.type === 'tap') {
           if (!point(input.x, input.y)) throw new MobileError('invalid_coordinates', 'Tap is outside the Android screen.');
@@ -407,30 +471,30 @@ export class DevicePool {
       } else if (input.type === 'text') {
         if (typeof input.text !== 'string' || input.text.length < 1 || input.text.length > 2000 || /[\x00-\x1f\x7f-\x9f]/.test(input.text)) throw new MobileError('invalid_text', 'Text must contain 1–2000 characters without control characters.');
         if (this.config.inputIme) {
-          await this.shell(device, ['ime', 'set', this.config.inputIme], { timeout: 5000 });
+          await context.step('select_keyboard', options => this.shell(device, ['ime', 'set', this.config.inputIme], options), 5000);
           args = ['am', 'broadcast', '--user', '0', '-a', 'ADB_INPUT_B64', '-p', this.config.inputIme.split('/')[0], '--es', 'msg', Buffer.from(input.text, 'utf8').toString('base64')];
         } else {
           if (/[^\x20-\x7e]/.test(input.text) || input.text.includes('%s')) throw new MobileError('text_not_supported', 'Unicode input requires the configured Android input keyboard.', 422);
           args = ['input', 'text', input.text.replaceAll(' ', '%s')];
         }
       } else throw new MobileError('invalid_input', 'Input type is not supported.');
-      await this.shell(device, args, { timeout: 8000 });
+      await context.step('send_input', options => this.shell(device, args, options), 8000);
       return { ok: true };
-    });
+    }, options);
   }
 
-  async launch(rawId, packageName) {
+  async launch(rawId, packageName, options) {
     const id = roomId(rawId);
     if (typeof packageName !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_]+)+$/.test(packageName) || packageName.length > 200) throw new MobileError('invalid_package', 'A valid Android package name is required.');
-    return this.lock(id, async () => {
-      const device = await this.activeDevice(id);
-      await this.connect(device);
-      const resolved = await this.shell(device, ['cmd', 'package', 'resolve-activity', '--brief', '--user', '0', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', packageName], { timeout: 8000, maxBuffer: 64 * 1024 });
+    return this.operation(id, 'launch', async context => {
+      const device = await context.step('inspect', options => this.activeDevice(id, options));
+      await context.step('connect', options => this.connect(device, options), 8000);
+      const resolved = await context.step('resolve_activity', options => this.shell(device, ['cmd', 'package', 'resolve-activity', '--brief', '--user', '0', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', packageName], { ...options, maxBuffer: 64 * 1024 }), 8000);
       const component = String(resolved).trim().split(/\r?\n/).at(-1) || '';
       const [resolvedPackage, activity, ...extra] = component.split('/');
       if (component.length > 512 || resolvedPackage !== packageName || extra.length || !/^\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(activity || '')) throw new MobileError('app_not_launchable', 'This Android app has no valid launcher activity.', 404);
-      await this.shell(device, ['am', 'start', '--user', '0', '-W', '-n', component], { timeout: 8000 });
+      await context.step('start_activity', options => this.shell(device, ['am', 'start', '--user', '0', '-W', '-n', component], options), 8000);
       return { ok: true };
-    });
+    }, options);
   }
 }

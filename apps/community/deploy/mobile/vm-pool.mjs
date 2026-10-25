@@ -9,6 +9,35 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 const fail = (code, message, status = 503) => new MobileError(code, message, status);
 const KEYS = new Set(['BACK', 'HOME', 'APP_SWITCH', 'ENTER', 'DEL', 'TAB', 'ESCAPE', 'DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT']);
+// Guest responses may contain private command output. Preserve only recognized
+// codes, with locally defined messages and statuses instead of guest text.
+const GUEST_ERRORS = Object.freeze({
+  device_boot_timeout:[503, 'Android did not finish starting.'],
+  device_keyboard_timeout:[503, 'Android is running, but its input keyboard is not ready.'],
+  device_runtime_unavailable:[503, 'The Android runtime could not be inspected.'],
+  device_display_unavailable:[503, 'Android display dimensions are unavailable.'],
+  device_screen_unavailable:[503, 'Android did not return a valid screenshot.'],
+  device_operation_failed:[503, 'The Android operation could not be completed.'],
+  device_operation_timeout:[504, 'The mobile operation took too long. Try again.'],
+  device_operation_cancelled:[409, 'The mobile operation was cancelled.'],
+  device_sleeping:[409, 'Open or wake this mobile device first.'],
+  device_starting:[409, 'The Android device is still starting.'],
+  device_in_use:[409, 'An AI task is using this Android device.'],
+  device_busy:[429, 'Too many Android operations are waiting.'],
+  device_capacity_busy:[409, 'All running Android slots are busy.'],
+  device_slots_full:[409, 'All persistent Android slots are assigned.'],
+  device_ownership_conflict:[409, 'The Android runtime ownership does not match this room.'],
+  device_configuration_conflict:[409, 'The Android runtime configuration does not match this room.'],
+  app_not_launchable:[404, 'The requested Android app has no launchable activity.'],
+  text_not_supported:[422, 'This text requires the configured Android input keyboard.'],
+  invalid_coordinates:[400, 'The input coordinates are outside the Android display.'],
+  invalid_input:[400, 'The Android input is invalid.'],
+  invalid_key:[400, 'The Android key is not supported.'],
+  invalid_text:[400, 'The Android input text is invalid.'],
+  invalid_package:[400, 'The Android package name is invalid.'],
+  invalid_lease:[400, 'The Android lease is invalid.'],
+  invalid_room:[400, 'The Android room is invalid.'],
+});
 
 function envInt(env, key, fallback, min, max) {
   const value = Number(env[key] || fallback);
@@ -69,7 +98,15 @@ export function requestGuest(spec, {method = 'GET', path:route, body, timeoutMs 
       });
       response.on('end', () => {
         const bytes = Buffer.concat(chunks);
-        if (response.statusCode !== 200) return finish(fail('guest_operation_failed', 'The private mobile operation could not be completed.', [400, 409, 422, 429].includes(response.statusCode) ? response.statusCode : 503));
+        if (response.statusCode !== 200) {
+          let code;
+          try {code = JSON.parse(bytes.toString('utf8'))?.error;} catch { /* Unrecognized bodies remain private. */ }
+          if (typeof code === 'string' && Object.hasOwn(GUEST_ERRORS, code)) {
+            const [status, message] = GUEST_ERRORS[code];
+            return finish(fail(code, message, status));
+          }
+          return finish(fail('guest_operation_failed', 'The private mobile operation could not be completed.', [400, 409, 422, 429].includes(response.statusCode) ? response.statusCode : 503));
+        }
         if (binary) return finish(null, bytes);
         try {finish(null, JSON.parse(bytes.toString('utf8')));} catch {finish(fail('guest_response_invalid', 'The mobile response is invalid.'));}
       });
@@ -98,23 +135,30 @@ export class VMPool {
       port:this.config.basePort + device.slot, dataDir:path.join(this.config.dataDir, 'rooms', device.roomId), token:guestToken(this.config.token, device.roomId)};
   }
 
-  async bounded(operation, timeoutMs, code) {
-    const controller = new AbortController(); let timer;
+  async bounded(operation, timeoutMs, code, {signal:callerSignal} = {}) {
+    const cancelled = () => fail('device_operation_cancelled', 'The mobile operation was cancelled.', 409);
+    if (callerSignal?.aborted) throw cancelled();
+    const controller = new AbortController(); let timer, cancel;
     try {
       return await Promise.race([
         Promise.resolve().then(() => operation(controller.signal)),
-        new Promise((_, reject) => {timer = setTimeout(() => {controller.abort(); reject(fail(code, 'The private mobile runtime operation timed out.'));}, timeoutMs);}),
+        new Promise((_, reject) => {
+          cancel = () => {controller.abort(); reject(cancelled());};
+          callerSignal?.addEventListener('abort', cancel, {once:true});
+          timer = setTimeout(() => {controller.abort(); reject(fail(typeof code === 'function' ? code() : code, 'The private mobile runtime operation timed out.'));}, timeoutMs);
+          if (callerSignal?.aborted) cancel();
+        }),
       ]);
-    } finally {clearTimeout(timer);}
+    } finally {clearTimeout(timer); callerSignal?.removeEventListener('abort', cancel);}
   }
 
   runtimeCall(name, device, timeoutMs = this.config.requestMs) {
     return this.bounded(signal => this.runtime[name](this.spec(device), {signal}), timeoutMs, 'vm_runtime_timeout');
   }
 
-  delegate(device, action = '', {method = 'GET', body, timeoutMs = this.config.requestMs, binary = false} = {}) {
+  delegate(device, action = '', {method = 'GET', body, timeoutMs = this.config.requestMs, binary = false, signal:callerSignal} = {}) {
     const route = action === 'health' ? '/health' : `/devices/${device.roomId}${action ? '/' + action : ''}`;
-    return this.bounded(signal => this.request(this.spec(device), {method, path:route, body, timeoutMs, binary, signal}), timeoutMs, 'guest_request_timeout');
+    return this.bounded(signal => this.request(this.spec(device), {method, path:route, body, timeoutMs, binary, signal}), timeoutMs, 'guest_request_timeout', {signal:callerSignal});
   }
 
   async wakeGuest(device) {
@@ -395,30 +439,35 @@ export class VMPool {
 
   async operation(rawId, action, options = {}) {
     const id = roomId(rawId);
-    return this.lock(id, async () => {
+    const budget = options.timeoutMs ?? this.config.requestMs, end = this.now() + budget;
+    let queued = true;
+    return this.bounded(signal => this.lock(id, async () => {
+      if (signal.aborted || this.now() >= end) throw fail('device_queue_timeout', 'The mobile request expired while waiting for another operation.');
+      queued = false;
       const device = this.devices.get(id);
       if (!device?.vmRunning || device.state !== 'running') throw fail('device_sleeping', 'Wake this mobile device first.', 409);
-      const result = await this.delegate(device, action, options);
+      const result = await this.delegate(device, action, {...options, timeoutMs:end - this.now(), signal});
+      if (signal.aborted || this.now() >= end) throw fail('guest_request_timeout', 'The private mobile request timed out.');
       device.lastActiveAt = this.now(); await this.persist();
       return result;
-    });
+    }), budget, () => queued ? 'device_queue_timeout' : 'guest_request_timeout', {signal:options.signal});
   }
 
-  async screenshot(rawId) {
-    const bytes = await this.operation(rawId, 'screenshot', {binary:true});
+  async screenshot(rawId, {signal} = {}) {
+    const bytes = await this.operation(rawId, 'screenshot', {binary:true, signal});
     if (!Buffer.isBuffer(bytes) || bytes.length > 5 * 1024 * 1024 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
       throw fail('guest_image_invalid', 'The mobile screenshot is invalid.');
     return bytes;
   }
 
-  async observe(rawId) {
-    const result = await this.operation(rawId, 'observe');
+  async observe(rawId, {signal} = {}) {
+    const result = await this.operation(rawId, 'observe', {signal});
     if (!result || !integer(result.width, 1, 8192) || !integer(result.height, 1, 8192) || !Array.isArray(result.nodes) || result.nodes.length > 400 || Buffer.byteLength(JSON.stringify(result)) > 240 * 1024)
       throw fail('guest_observation_invalid', 'The mobile screen observation is invalid.');
     return {width:result.width, height:result.height, nodes:result.nodes};
   }
 
-  async input(rawId, body) {
+  async input(rawId, body, {signal} = {}) {
     const fields = {tap:['type', 'x', 'y'], swipe:['type', 'x1', 'y1', 'x2', 'y2', 'duration'], key:['type', 'key'], text:['type', 'text']}[body?.type];
     if (!fields || Object.keys(body).some(key => !fields.includes(key))) throw fail('invalid_input', 'The mobile input is invalid.', 400);
     if (body.type === 'tap' && ![body.x, body.y].every(value => integer(value, 0, 8191)) ||
@@ -426,13 +475,13 @@ export class VMPool {
         body.type === 'key' && !KEYS.has(body.key) ||
         body.type === 'text' && (typeof body.text !== 'string' || body.text.length < 1 || body.text.length > 2000 || /[\x00-\x1f\x7f-\x9f]/.test(body.text)))
       throw fail('invalid_input', 'The mobile input is invalid.', 400);
-    await this.operation(rawId, 'input', {method:'POST', body});
+    await this.operation(rawId, 'input', {method:'POST', body, signal});
     return this.status(rawId);
   }
 
-  async launch(rawId, packageName) {
+  async launch(rawId, packageName, {signal} = {}) {
     if (typeof packageName !== 'string' || packageName.length > 200 || !/^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+$/.test(packageName)) throw fail('invalid_package', 'An installed Android package name is required.', 400);
-    await this.operation(rawId, 'launch', {method:'POST', body:{package:packageName}});
+    await this.operation(rawId, 'launch', {method:'POST', body:{package:packageName}, signal});
     return this.status(rawId);
   }
 

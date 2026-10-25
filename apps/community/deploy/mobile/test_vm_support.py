@@ -56,6 +56,8 @@ class SeedTests(unittest.TestCase):
         self.assertIn('MOBILE_BROKER_TOKEN=' + token, env['content'])
         self.assertIn('MOBILE_MAX_SLOTS=1\nMOBILE_MAX_RUNNING=1', env['content'])
         self.assertIn('MOBILE_BOOT_SECONDS=600\n', env['content'])
+        self.assertIn('MOBILE_COMMAND_TIMEOUT_SCALE=3\n', env['content'])
+        self.assertIn('MOBILE_OPERATION_SECONDS=45\n', env['content'])
         self.assertNotIn('MOBILE_ANDROID_IMAGE', env['content'])
         self.assertNotIn(token, json.dumps(data['runcmd']))
         self.assertNotIn(token, docs['meta-data'].decode())

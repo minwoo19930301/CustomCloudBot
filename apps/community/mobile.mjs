@@ -90,6 +90,13 @@ const BROKER_ERRORS = {
   device_slots_full: "All saved mobile device slots are in use",
   device_sleeping: "This mobile device is sleeping; wake it before use",
   device_busy: "This mobile device is working and cannot sleep yet",
+  device_queue_timeout: "This mobile device is busy; wait for its current operation and retry",
+  guest_request_timeout: "Android did not respond in time; wait briefly and retry",
+  guest_connection_failed: "The private Android connection is unavailable; check its status and retry",
+  guest_operation_failed: "Android could not complete the operation; check its screen and retry",
+  device_operation_failed: "Android could not complete the operation; check its screen and retry",
+  device_operation_timeout: "The Android operation took too long; check its screen before retrying",
+  device_operation_cancelled: "The Android operation was cancelled; check its screen before retrying",
   vm_boot_timeout: "The mobile VM did not finish starting; retry after checking its runtime",
   device_boot_timeout: "Android did not finish starting; retry after checking its runtime",
   device_keyboard_timeout: "Android is running, but its keyboard is not ready; reconnect the keyboard in the mobile workspace",
@@ -98,6 +105,17 @@ const BROKER_ERRORS = {
   vm_recovery_required: "The mobile runtime restarted; wake this device again",
   text_unicode_unsupported: "This device keyboard does not support that text yet",
 };
+
+// Never put arbitrary broker error strings, request bodies or room identifiers in logs.
+const LOG_ERROR_CODES = new Set([...Object.keys(BROKER_ERRORS),
+  "MOBILE_TIMEOUT", "MOBILE_UNAVAILABLE", "MOBILE_AUTH_FAILED", "MOBILE_REDIRECT_REJECTED",
+  "MOBILE_RESPONSE_TOO_LARGE", "MOBILE_RESPONSE_INVALID", "MOBILE_IMAGE_INVALID", "MOBILE_BROKER_ERROR",
+  "guest_image_invalid", "guest_observation_invalid", "guest_request_cancelled", "guest_request_invalid",
+  "guest_response_invalid", "guest_response_too_large",
+  "device_runtime_unavailable", "device_display_unavailable", "device_screen_unavailable", "device_starting", "device_in_use",
+  "device_ownership_conflict", "device_configuration_conflict", "app_not_launchable", "text_not_supported",
+  "invalid_coordinates", "invalid_input", "invalid_key", "invalid_text", "invalid_package", "invalid_lease", "invalid_room", "vm_runtime_timeout",
+]);
 
 function boundedObservation(value) {
   if (!value || !Number.isInteger(value.width) || !Number.isInteger(value.height) || value.width < 1 || value.height < 1 || value.width > 8192 || value.height > 8192 || !Array.isArray(value.nodes)) throw fail(502, "MOBILE_RESPONSE_INVALID", "Mobile screen response is invalid");
@@ -117,12 +135,13 @@ function boundedObservation(value) {
 }
 
 /** The HTTP server authenticates room membership; this adapter never accepts a target room in tool arguments. */
-export function createMobileHub({ getConfig, assertWritable = async () => {}, env = process.env, allowInsecureLoopback = env.NODE_ENV !== "production", allowInternalHttp = env.MOBILE_BROKER_ALLOW_INTERNAL_HTTP === "1", timeoutMs = 15000, wakeTimeoutMs = 600000, readyTimeoutMs = 600000, readyPollMs = 1000, leaseIntervalMs = 30000 } = {}) {
+export function createMobileHub({ getConfig, assertWritable = async () => {}, env = process.env, allowInsecureLoopback = env.NODE_ENV !== "production", allowInternalHttp = env.MOBILE_BROKER_ALLOW_INTERNAL_HTTP === "1", timeoutMs = 15000, operationTimeoutMs = 90000, wakeTimeoutMs = 600000, readyTimeoutMs = 600000, readyPollMs = 1000, leaseIntervalMs = 30000, log = entry => console.warn(JSON.stringify(entry)) } = {}) {
   const tasks = new Map();
   const queues = new Map();
   const depths = new Map();
   const inFlight = new Set();
   const frames = new Map();
+  const observations = new Map();
   let closed = false;
   let closing = false;
   const config = () => brokerConfig(getConfig ? getConfig() : envConfig(env), allowInsecureLoopback, allowInternalHttp);
@@ -134,6 +153,8 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     try { settings = config(); } catch (error) { return Promise.reject(error); }
     const url = settings.socketPath ? null : new URL(path.replace(/^\//, ""), settings.endpoint);
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const started = performance.now();
+    const action = path === "health" ? "health" : path.split("/")[2] || "status";
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer;
@@ -141,6 +162,9 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
       const finish = (error, value) => {
         if (settled) return;
         settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); inFlight.delete(req);
+        if (error && error.code !== "MOBILE_CANCELLED") {
+          try { log({ event: "mobile_operation_failed", action, code: LOG_ERROR_CODES.has(error.code) ? error.code : "MOBILE_BROKER_ERROR", durationMs: Math.round(performance.now() - started) }); } catch {}
+        }
         error ? reject(error) : resolve(value);
       };
       const req = (url?.protocol === "https:" ? https : http).request({
@@ -172,7 +196,7 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
           if (status < 200 || status >= 300) {
             if (status === 401 || status === 403) return finish(fail(503, "MOBILE_AUTH_FAILED", "Mobile broker authentication failed"));
             const code = typeof result?.error === "string" && /^[a-z0-9_]{1,80}$/.test(result.error) ? result.error : "MOBILE_BROKER_ERROR";
-            return finish(fail([400, 404, 409, 422, 429, 503].includes(status) ? status : 502, code, BROKER_ERRORS[code] || "Mobile device request failed"));
+            return finish(fail([400, 404, 409, 422, 429, 503, 504].includes(status) ? status : 502, code, BROKER_ERRORS[code] || "Mobile device request failed"));
           }
           if (!result || typeof result !== "object" || Array.isArray(result)) return finish(fail(502, "MOBILE_RESPONSE_INVALID", "Mobile broker response is invalid"));
           finish(null, result);
@@ -206,7 +230,7 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     queues.set(key, tracked); return pending;
   };
   const lease = (key, active, state) => {
-    const pending = (state.pending || Promise.resolve()).catch(() => {}).then(() => request(route(key, "lease"), { method: "POST", body: { active } }));
+    const pending = (state.pending || Promise.resolve()).catch(() => {}).then(() => request(route(key, "lease"), { method: "POST", body: { active }, timeout: operationTimeoutMs }));
     state.pending = pending;
     return pending;
   };
@@ -282,16 +306,18 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     if (active?.count) await lease(roomKey(roomId), true, active);
     return result;
   };
-  const observeRaw = async (roomId, options = {}) => boundedObservation(await request(route(roomId, "observe"), { signal: options.signal }));
+  // Android work can wait behind an in-progress 45s guest operation. Health and
+  // status keep their short deadline; device operations allow that bounded wait.
+  const observeRaw = async (roomId, options = {}) => boundedObservation(await request(route(roomId, "observe"), { signal: options.signal, timeout: operationTimeoutMs }));
   const inputRaw = async (roomId, action, options = {}) => {
     const input = validateMobileInput(action);
     await writable(roomId, options);
-    return request(route(roomId, "input"), { method: "POST", body: input, signal: options.signal });
+    return request(route(roomId, "input"), { method: "POST", body: input, signal: options.signal, timeout: operationTimeoutMs });
   };
   const launchRaw = async (roomId, value, options = {}) => {
     const name = packageName(value);
     await writable(roomId, options);
-    return request(route(roomId, "launch"), { method: "POST", body: { package: name }, signal: options.signal });
+    return request(route(roomId, "launch"), { method: "POST", body: { package: name }, signal: options.signal, timeout: operationTimeoutMs });
   };
   const execute = (roomId, name, args = {}, options = {}) => enqueue(roomId, async () => {
     await writable(roomId, options);
@@ -320,16 +346,23 @@ export function createMobileHub({ getConfig, assertWritable = async () => {}, en
     sleep: (roomId, options = {}) => enqueue(roomId, async () => {
       await writable(roomId, options);
       if (tasks.get(roomKey(roomId))?.count) throw fail(409, "device_busy", BROKER_ERRORS.device_busy);
-      return request(route(roomId, "sleep"), { method: "POST", body: {}, signal: options.signal });
+      return request(route(roomId, "sleep"), { method: "POST", body: {}, signal: options.signal, timeout: operationTimeoutMs });
     }),
     screenshot: (roomId, options = {}) => {
       const key = roomKey(roomId);
-      if (options.signal) return request(route(roomId, "screenshot"), { image: true, signal: options.signal });
+      if (options.signal) return request(route(roomId, "screenshot"), { image: true, signal: options.signal, timeout: operationTimeoutMs });
       if (frames.has(key)) return frames.get(key);
-      const pending = request(route(roomId, "screenshot"), { image: true }).finally(() => { if (frames.get(key) === pending) frames.delete(key); });
+      const pending = request(route(roomId, "screenshot"), { image: true, timeout: operationTimeoutMs }).finally(() => { if (frames.get(key) === pending) frames.delete(key); });
       frames.set(key, pending); return pending;
     },
-    observe: (roomId, options = {}) => enqueue(roomId, () => observeRaw(roomId, options)),
+    observe: (roomId, options = {}) => {
+      const key = roomKey(roomId);
+      // Separately cancellable callers must not cancel another viewer's read.
+      if (options.signal) return enqueue(roomId, () => observeRaw(roomId, options));
+      if (observations.has(key)) return observations.get(key);
+      const pending = enqueue(roomId, () => observeRaw(roomId, options)).finally(() => { if (observations.get(key) === pending) observations.delete(key); });
+      observations.set(key, pending); return pending;
+    },
     input: (roomId, action, options = {}) => enqueue(roomId, () => inputRaw(roomId, action, options)),
     launch: (roomId, value, options = {}) => enqueue(roomId, () => launchRaw(roomId, value, options)),
     execute, startTask, endTask, close,

@@ -61,9 +61,10 @@ test('configuration keeps ten saved VMs, one running VM and bounded cold boot by
   const config = vmConfiguration({MOBILE_BROKER_TOKEN:TOKEN});
   assert.equal(config.maxSlots, 10); assert.equal(config.maxRunning, 1); assert.equal(config.wakeMs, 300000);
   assert.equal(config.dataDir, '/var/lib/customcloudbot-mobile-vm');
+  assert.equal(vmConfiguration({MOBILE_BROKER_TOKEN:TOKEN, MOBILE_VM_REQUEST_SECONDS:'60'}).requestMs, 60_000);
   assert.equal(guestToken(TOKEN, A), guestToken(TOKEN, A.toUpperCase()));
   assert.notEqual(guestToken(TOKEN, A), guestToken(TOKEN, B));
-  for (const env of [{MOBILE_MAX_SLOTS:'101'}, {MOBILE_MAX_RUNNING:'0'}, {MOBILE_VM_BASE_PORT:'65535'}, {MOBILE_VM_DATA_DIR:'../tmp'}, {MOBILE_VM_BOOT_SECONDS:'0'}])
+  for (const env of [{MOBILE_MAX_SLOTS:'101'}, {MOBILE_MAX_RUNNING:'0'}, {MOBILE_VM_BASE_PORT:'65535'}, {MOBILE_VM_DATA_DIR:'../tmp'}, {MOBILE_VM_BOOT_SECONDS:'0'}, {MOBILE_VM_REQUEST_SECONDS:'61'}])
     assert.throws(() => vmConfiguration({MOBILE_BROKER_TOKEN:TOKEN, ...env}));
   assert.throws(() => guestToken(TOKEN, '../other'));
 });
@@ -146,6 +147,133 @@ test('an in-flight screen operation cannot be evicted by another wake', async t 
   assert.equal((await f.pool.status(B)).device.lastError,'device_capacity_busy');
   assert.equal(f.calls.filter(call => call.name === 'stop').length,0);
   gate.resolve(); await observing; await ready(f.pool,B);
+});
+
+test('an expired queued input returns promptly and never runs when the previous operation releases', async t => {
+  const gate = deferred(), entered = deferred();
+  const f = await fixture(t, {config:{requestMs:20}, request:async (spec, request) => {
+    if (request.path.endsWith('/observe')) {entered.resolve(); await gate.promise;}
+  }});
+  t.after(() => gate.resolve());
+  await ready(f.pool, A);
+  const first = f.pool.operation(A, 'observe', {timeoutMs:1000});
+  await entered.promise;
+  await assert.rejects(f.pool.input(A, {type:'key', key:'HOME'}), {code:'device_queue_timeout'});
+  assert.equal(f.requests.some(request => request.path.endsWith('/input')), false);
+  gate.resolve(); await first;
+  await f.pool.locks.get(A)?.catch(() => {});
+  assert.equal(f.requests.some(request => request.path.endsWith('/input')), false);
+  assert.equal(f.pool.depths.has(A), false);
+});
+
+test('guest operation receives only the configured budget left after queue wait', async t => {
+  const gate = deferred(), entered = deferred();
+  const f = await fixture(t, {config:{requestMs:60_000}, request:async (spec, request) => {
+    if (request.path.endsWith('/observe')) {entered.resolve(); await gate.promise;}
+  }});
+  t.after(() => gate.resolve());
+  await ready(f.pool, A);
+  const first = f.pool.operation(A, 'observe', {timeoutMs:60_000});
+  await entered.promise;
+  const second = f.pool.input(A, {type:'key', key:'HOME'});
+  f.advance(9000); gate.resolve();
+  await Promise.all([first, second]);
+  assert.equal(f.requests.find(request => request.path.endsWith('/input')).timeoutMs, 51_000);
+});
+
+test('an in-flight operation aborts its guest transport when the shared budget expires', async t => {
+  let signal;
+  const f = await fixture(t, {config:{requestMs:20}, request:async (spec, request) => {
+    if (request.path.endsWith('/input')) {
+      signal = request.signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new MobileError('guest_request_cancelled', 'Cancelled', 499)), {once:true});
+      });
+    }
+  }});
+  await ready(f.pool, A);
+  await assert.rejects(f.pool.input(A, {type:'key', key:'HOME'}), {code:'guest_request_timeout'});
+  assert.equal(signal.aborted, true);
+  await f.pool.locks.get(A)?.catch(() => {});
+  assert.equal(f.pool.depths.has(A), false);
+  assert.equal(f.calls.some(call => call.name === 'stop'), false);
+});
+
+test('all four VM operation methods reject already-cancelled callers without sending work', async t => {
+  const f = await fixture(t);
+  await ready(f.pool, A);
+  const count = f.requests.length, controller = new AbortController(); controller.abort();
+  const options = {signal:controller.signal};
+  for (const action of [() => f.pool.screenshot(A, options), () => f.pool.observe(A, options),
+    () => f.pool.input(A, {type:'key', key:'HOME'}, options), () => f.pool.launch(A, 'com.android.settings', options)]) {
+    await assert.rejects(action(), {code:'device_operation_cancelled', status:409});
+  }
+  assert.equal(f.requests.length, count);
+  assert.equal(f.pool.depths.has(A), false);
+});
+
+test('caller cancellation removes a queued input from execution without cancelling an unrelated active operation', async t => {
+  const gate = deferred(), entered = deferred();
+  let activeSignal;
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/observe')) {activeSignal = request.signal; entered.resolve(); await gate.promise;}
+  }});
+  t.after(() => gate.resolve());
+  await ready(f.pool, A);
+  const first = f.pool.observe(A); await entered.promise;
+  const controller = new AbortController();
+  const second = assert.rejects(f.pool.input(A, {type:'key', key:'HOME'}, {signal:controller.signal}), {code:'device_operation_cancelled'});
+  controller.abort(); await second;
+  assert.equal(activeSignal.aborted, false);
+  gate.resolve(); await first;
+  await f.pool.locks.get(A)?.catch(() => {});
+  assert.equal(f.requests.some(request => request.path.endsWith('/input')), false);
+});
+
+test('all four VM operation methods forward caller cancellation to the active guest request', async t => {
+  const f = await fixture(t);
+  await ready(f.pool, A);
+  const original = f.pool.request;
+  for (const action of ['screenshot', 'observe', 'input', 'launch']) {
+    const entered = deferred(); let guestSignal;
+    f.pool.request = (spec, request) => {
+      if (!request.path.endsWith('/' + action)) return original(spec, request);
+      guestSignal = request.signal; entered.resolve();
+      return new Promise((resolve, reject) => guestSignal.addEventListener('abort', () => reject(new MobileError('guest_request_cancelled', 'Cancelled', 499)), {once:true}));
+    };
+    const controller = new AbortController(), options = {signal:controller.signal};
+    const pending = action === 'input' ? f.pool.input(A, {type:'key', key:'HOME'}, options)
+      : action === 'launch' ? f.pool.launch(A, 'com.android.settings', options) : f.pool[action](A, options);
+    const rejected = assert.rejects(pending, {code:'device_operation_cancelled', status:409});
+    await entered.promise; controller.abort(); await rejected;
+    assert.equal(guestSignal.aborted, true);
+    await f.pool.locks.get(A)?.catch(() => {});
+    assert.equal(f.pool.depths.has(A), false);
+  }
+});
+
+test('closing the app HTTP request cancels the guest request through the shared broker service', async t => {
+  const entered = deferred(), aborted = deferred();
+  const f = await fixture(t, {request:async (spec, request) => {
+    if (request.path.endsWith('/screenshot')) {
+      entered.resolve();
+      return new Promise((resolve, reject) => request.signal.addEventListener('abort', () => {
+        aborted.resolve(); reject(new MobileError('guest_request_cancelled', 'Cancelled', 499));
+      }, {once:true}));
+    }
+  }});
+  await ready(f.pool, A);
+  const server = createServer(f.pool, TOKEN);
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => {server.closeAllConnections(); await new Promise(resolve => server.close(resolve));});
+  const controller = new AbortController();
+  const pending = fetch(`http://127.0.0.1:${server.address().port}/devices/${A}/screenshot`, {headers:{authorization:`Bearer ${TOKEN}`}, signal:controller.signal});
+  const rejected = assert.rejects(pending, {name:'AbortError'});
+  await entered.promise; controller.abort(); await rejected;
+  await Promise.race([aborted.promise, new Promise((resolve, reject) => {const timer = setTimeout(() => reject(new Error('Guest cancellation was not forwarded')), 500); aborted.promise.finally(() => clearTimeout(timer));})]);
+  await f.pool.locks.get(A)?.catch(() => {});
+  assert.equal(f.pool.depths.has(A), false);
+  assert.equal(f.calls.some(call => call.name === 'stop'), false);
 });
 
 test('concurrent wakes and stored-slot exhaustion cannot exceed capacity or stop an unrelated VM', async t => {
@@ -457,6 +585,14 @@ test('private guest transport fixes host, authorization and room routes, and bou
   assert.equal(seen.length,1);
   handler=(request,response)=>{response.writeHead(302,{location:'http://example.com/secret'});response.end(spec.token);};
   await assert.rejects(requestGuest(spec,{path:'/health'}),error=>error.code==='guest_operation_failed'&&!error.message.includes(spec.token));
+  for (const [code, status] of [['device_starting',409], ['device_screen_unavailable',503], ['device_operation_failed',503], ['device_operation_timeout',504], ['device_operation_cancelled',409], ['invalid_coordinates',400]]) {
+    handler=(request,response)=>{response.writeHead(503,{'content-type':'application/json'});response.end(JSON.stringify({error:code,message:spec.token,stderr:spec.token}));};
+    await assert.rejects(requestGuest(spec,{path:`/devices/${A}/screenshot`,binary:true}), error => error.code === code && error.status === status && !error.message.includes(spec.token));
+  }
+  for (const code of [spec.token, '__proto__', 'constructor', {private:spec.token}]) {
+    handler=(request,response)=>{response.writeHead(503);response.end(JSON.stringify({error:code,message:spec.token}));};
+    await assert.rejects(requestGuest(spec,{path:'/health'}), error => error.code === 'guest_operation_failed' && !error.message.includes(spec.token));
+  }
   handler=()=>{};
   await assert.rejects(requestGuest(spec,{path:'/health',timeoutMs:10}),error=>error.code==='guest_request_timeout');
   handler=(request,response)=>response.end('x'.repeat(256*1024+1));

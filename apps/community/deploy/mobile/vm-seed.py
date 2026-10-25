@@ -49,7 +49,8 @@ def seed_documents(request, sources):
     instance_env = "\n".join([
         "MOBILE_BROKER_TOKEN=" + token, "MOBILE_LISTEN_SOCKET=",
         "MOBILE_LISTEN_HOST=10.0.2.15", "MOBILE_LISTEN_PORT=8091",
-        "MOBILE_MAX_SLOTS=1", "MOBILE_MAX_RUNNING=1", "MOBILE_BOOT_SECONDS=600", "MOBILE_EXTERNAL_CONTAINERS=", "",
+        "MOBILE_MAX_SLOTS=1", "MOBILE_MAX_RUNNING=1", "MOBILE_BOOT_SECONDS=600",
+        "MOBILE_COMMAND_TIMEOUT_SCALE=3", "MOBILE_OPERATION_SECONDS=45", "MOBILE_EXTERNAL_CONTAINERS=", "",
     ])
     data = {
         "hostname": "mobile-" + room[:8], "manage_etc_hosts": True,
