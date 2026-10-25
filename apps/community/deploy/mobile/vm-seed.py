@@ -50,7 +50,8 @@ def seed_documents(request, sources):
         "MOBILE_BROKER_TOKEN=" + token, "MOBILE_LISTEN_SOCKET=",
         "MOBILE_LISTEN_HOST=10.0.2.15", "MOBILE_LISTEN_PORT=8091",
         "MOBILE_MAX_SLOTS=1", "MOBILE_MAX_RUNNING=1", "MOBILE_BOOT_SECONDS=600",
-        "MOBILE_COMMAND_TIMEOUT_SCALE=3", "MOBILE_OPERATION_SECONDS=45", "MOBILE_EXTERNAL_CONTAINERS=", "",
+        "MOBILE_COMMAND_TIMEOUT_SCALE=3", "MOBILE_OPERATION_SECONDS=45",
+        "MOBILE_REQUIRE_READY_REVISION=true", "MOBILE_EXTERNAL_CONTAINERS=", "",
     ])
     data = {
         "hostname": "mobile-" + room[:8], "manage_etc_hosts": True,
@@ -63,9 +64,13 @@ def seed_documents(request, sources):
             # runs after the first fstab mount, so the golden must contain it too.
             {"path": "/etc/systemd/system/dev-binderfs.mount.d/order.conf", "owner": "root:root", "permissions": "0644",
              "content": "[Unit]\nRequires=systemd-modules-load.service\nAfter=systemd-modules-load.service\n"},
+            {"path": "/etc/customcloudbot-mobile.pending-revision", "owner": "root:root", "permissions": "0644", "content": revision + "\n"},
             *[{"path": "/opt/customcloudbot-mobile/" + name, "owner": "root:root", "permissions": "0644", "content": sources[name]} for name in SOURCE_NAMES],
         ],
-        "runcmd": [["systemctl", "daemon-reload"], ["systemctl", "enable", "customcloudbot-mobile.service"], ["systemctl", "restart", "customcloudbot-mobile.service"]],
+        # A fixed script is required here: cloud-init's separate runcmd entries
+        # do not stop after failure. Never publish readiness if restart fails.
+        "runcmd": [["systemctl", "daemon-reload"], ["systemctl", "enable", "customcloudbot-mobile.service"],
+                   ["/bin/sh", "-ec", "/usr/bin/systemctl restart customcloudbot-mobile.service\nexec /bin/mv -f -- /etc/customcloudbot-mobile.pending-revision /etc/customcloudbot-mobile.ready-revision"]],
     }
     return {"user-data": ("#cloud-config\n" + json.dumps(data)).encode(),
             "meta-data": json.dumps({"instance-id": "customcloudbot-mobile-" + room + "-runtime-v2-" + revision, "local-hostname": "mobile-" + room[:8]}).encode()}

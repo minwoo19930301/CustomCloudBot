@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { configuration, DevicePool, parseUiTree, roomId, runCommand, operationDiagnostic } from './device-pool.mjs';
-import { BROKER_RUNTIME_REVISION, createServer, listenServer } from './service.mjs';
+import { BROKER_RUNTIME_REVISION, createServer, listenServer, readReadyRevision } from './service.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
@@ -697,4 +697,68 @@ test('invalid screen data and child output limits have distinct safe diagnostic 
   await assert.rejects(pool.screenshot(A), error => error.code === 'device_screen_unavailable' && operationDiagnostic(error).stage === 'validate_screen');
   outputLimit = true;
   await assert.rejects(pool.screenshot(A), error => operationDiagnostic(error).stage === 'screencap' && operationDiagnostic(error).code === 'output_limit');
+});
+
+test('guest readiness opt-in is explicit and cannot silently accept a misspelled value', () => {
+  const env = { MOBILE_ANDROID_IMAGE: 'image', MOBILE_BROKER_TOKEN: TOKEN };
+  assert.equal(configuration(env).requireReadyRevision, false);
+  assert.equal(configuration({ ...env, MOBILE_REQUIRE_READY_REVISION: 'true' }).requireReadyRevision, true);
+  assert.equal(configuration({ ...env, MOBILE_REQUIRE_READY_REVISION: 'false' }).requireReadyRevision, false);
+  assert.throws(() => configuration({ ...env, MOBILE_REQUIRE_READY_REVISION: 'yes' }), /MOBILE_REQUIRE_READY_REVISION/);
+});
+
+test('guest health waits for its post-restart revision but normal restart reuses the persistent proof', async t => {
+  let marker;
+  const readyRevision = async () => {
+    if (marker instanceof Error) throw marker;
+    return marker;
+  };
+  const health = async () => ({ ok: true, slots: 1, maxSlots: 1 });
+  const makeServer = async options => {
+    const server = createServer({ health }, TOKEN, options);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+    return async (authenticated = true) => fetch(`http://127.0.0.1:${server.address().port}/health`, { headers: authenticated ? { Authorization: `Bearer ${TOKEN}` } : {} });
+  };
+  const request = await makeServer({ requireReadyRevision: true, readyRevision });
+  assert.equal((await request(false)).status, 401);
+  for (marker of [undefined, '000000000000', 'untrusted malformed revision', Object.assign(new Error('private marker error'), { code: 'ENOENT' }), new Error('unreadable marker')]) {
+    const response = await request();
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: false, slots: 1, maxSlots: 1, runtimeRevision: BROKER_RUNTIME_REVISION });
+  }
+  marker = BROKER_RUNTIME_REVISION;
+  assert.equal((await (await request()).json()).ok, true);
+  const restarted = await makeServer({ requireReadyRevision: true, readyRevision });
+  assert.equal((await (await restarted()).json()).ok, true);
+  const host = await makeServer({ readyRevision: async () => { throw new Error('The host must never inspect a guest marker'); } });
+  assert.equal((await (await host()).json()).ok, true);
+});
+
+test('ready marker reader uses only the fixed bounded non-symlink root-owned file', async () => {
+  const { constants } = await import('node:fs');
+  let closed = 0, reads = 0;
+  let properties = { uid: 0, mode: 0o100644, size: 13, isFile: () => true };
+  let contents = BROKER_RUNTIME_REVISION + '\n';
+  const openFile = async (file, flags) => {
+    assert.equal(file, '/etc/customcloudbot-mobile.ready-revision');
+    assert.equal(flags & constants.O_NOFOLLOW, constants.O_NOFOLLOW);
+    assert.equal(flags & constants.O_NONBLOCK, constants.O_NONBLOCK);
+    return {
+      stat: async () => properties,
+      read: async buffer => { reads++; assert.equal(buffer.length, 14); return { bytesRead: buffer.write(contents) }; },
+      close: async () => { closed++; },
+    };
+  };
+  assert.equal(await readReadyRevision({ openFile }), BROKER_RUNTIME_REVISION);
+  const safe = { ...properties };
+  for (const changed of [{ uid: 1000 }, { mode: 0o100666 }, { size: 10000 }, { size: 0 }, { isFile: () => false }]) {
+    properties = { ...safe, ...changed };
+    assert.equal(await readReadyRevision({ openFile }), '');
+  }
+  assert.equal(reads, 1);
+  properties = safe; contents = BROKER_RUNTIME_REVISION + 'xx';
+  assert.equal(await readReadyRevision({ openFile }), '');
+  assert.equal(closed, 7);
+  await assert.rejects(readReadyRevision({ openFile: async () => { throw Object.assign(new Error('symlink refused'), { code: 'ELOOP' }); } }), { code: 'ELOOP' });
 });

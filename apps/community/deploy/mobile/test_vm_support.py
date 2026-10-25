@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
+import shlex
 import stat
 import tempfile
 import threading
@@ -58,13 +60,51 @@ class SeedTests(unittest.TestCase):
         self.assertIn('MOBILE_BOOT_SECONDS=600\n', env['content'])
         self.assertIn('MOBILE_COMMAND_TIMEOUT_SCALE=3\n', env['content'])
         self.assertIn('MOBILE_OPERATION_SECONDS=45\n', env['content'])
+        self.assertIn('MOBILE_REQUIRE_READY_REVISION=true\n', env['content'])
         self.assertNotIn('MOBILE_ANDROID_IMAGE', env['content'])
         self.assertNotIn(token, json.dumps(data['runcmd']))
         self.assertNotIn(token, docs['meta-data'].decode())
         self.assertEqual(data['users'], [])
         self.assertEqual(data['ssh_genkeytypes'], [])
-        self.assertEqual(files[3:], [{'path': '/opt/customcloudbot-mobile/' + name, 'owner': 'root:root', 'permissions': '0644', 'content': SOURCES[name]} for name in seed.SOURCE_NAMES])
-        self.assertEqual(data['runcmd'][-1], ['systemctl', 'restart', 'customcloudbot-mobile.service'])
+        self.assertEqual(files[4:], [{'path': '/opt/customcloudbot-mobile/' + name, 'owner': 'root:root', 'permissions': '0644', 'content': SOURCES[name]} for name in seed.SOURCE_NAMES])
+        self.assertEqual(data['runcmd'][-1][:2], ['/bin/sh', '-ec'])
+
+    def test_seed_publishes_revision_atomically_only_after_successful_restart(self):
+        docs = seed.seed_documents({'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}, SOURCES)
+        data = json.loads(docs['user-data'].decode().split('\n', 1)[1])
+        pending = '/etc/customcloudbot-mobile.pending-revision'
+        ready = '/etc/customcloudbot-mobile.ready-revision'
+        marker = [file for file in data['write_files'] if file['path'] == pending]
+        self.assertEqual(marker, [{'path': pending, 'owner': 'root:root', 'permissions': '0644', 'content': REVISION + '\n'}])
+        self.assertNotIn(ready, [file['path'] for file in data['write_files']])
+        self.assertEqual(data['runcmd'][-1], ['/bin/sh', '-ec',
+                         '/usr/bin/systemctl restart customcloudbot-mobile.service\nexec /bin/mv -f -- ' + pending + ' ' + ready])
+        with tempfile.TemporaryDirectory(prefix='ccb-ready-marker-') as directory:
+            root = Path(directory)
+            for success in [False, True]:
+                pending_file, ready_file = root / 'pending', root / 'ready'
+                pending_file.write_text(REVISION + '\n')
+                pending_file.chmod(0o644)
+                ready_file.write_text('previous0000\n')
+                previous_inode = ready_file.stat().st_ino
+                systemctl = root / 'systemctl'
+                systemctl.write_text('#!/bin/sh\nexit ' + ('0' if success else '1') + '\n')
+                systemctl.chmod(0o755)
+                # Substitute only fixed system paths for the local test harness.
+                script = data['runcmd'][-1][2].replace('/usr/bin/systemctl', shlex.quote(str(systemctl)))
+                script = script.replace(pending, shlex.quote(str(pending_file))).replace(ready, shlex.quote(str(ready_file)))
+                result = subprocess.run(['/bin/sh', '-ec', script], capture_output=True)
+                if success:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(ready_file.read_text(), REVISION + '\n')
+                    self.assertEqual(ready_file.stat().st_mode & 0o777, 0o644)
+                    self.assertFalse(pending_file.exists())
+                    self.assertNotEqual(ready_file.stat().st_ino, previous_inode)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(ready_file.read_text(), 'previous0000\n')
+                    self.assertTrue(pending_file.exists())
+                    self.assertEqual(ready_file.stat().st_ino, previous_inode)
 
     def test_seed_preserves_binder_mount_dependency_instead_of_ignoring_mount_failure(self):
         docs = seed.seed_documents({'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}, SOURCES)

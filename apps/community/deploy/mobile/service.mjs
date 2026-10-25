@@ -1,10 +1,10 @@
 import http from 'node:http';
 import net from 'node:net';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { constants, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { chmod, lstat, mkdir, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import { configuration, DevicePool, MobileError, operationDiagnostic } from './device-pool.mjs';
 
 // Capture the loaded runtime once. Reading updated files per request could let
@@ -14,6 +14,20 @@ export const BROKER_RUNTIME_REVISION = createHash('sha256')
   .update('\0')
   .update(readFileSync(new URL('./service.mjs', import.meta.url)))
   .digest('hex').slice(0, 12);
+
+// A loaded revision may answer health before cloud-final restarts the broker.
+// Only its root-owned post-restart marker proves that update has completed.
+export async function readReadyRevision({ openFile = open } = {}) {
+  const file = await openFile('/etc/customcloudbot-mobile.ready-revision', constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.uid !== 0 || info.mode & 0o022 || info.size < 12 || info.size > 13) return '';
+    const bytes = Buffer.alloc(14);
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+    const value = bytes.subarray(0, bytesRead).toString('utf8');
+    return /^[a-f0-9]{12}\n?$/.test(value) ? value.trim() : '';
+  } finally { await file.close(); }
+}
 
 function authorized(request, token) {
   const supplied = Buffer.from(request.headers.authorization || '');
@@ -40,7 +54,7 @@ function send(response, status, data) {
   response.end(JSON.stringify(data));
 }
 
-export function createServer(pool, token, { logFailure = entry => console.error(JSON.stringify(entry)) } = {}) {
+export function createServer(pool, token, { logFailure = entry => console.error(JSON.stringify(entry)), requireReadyRevision = false, readyRevision = readReadyRevision } = {}) {
   let activeRequests = 0;
   const server = http.createServer(async (request, response) => {
     if (!authorized(request, token)) { send(response, 401, { error: 'unauthorized', message: 'Authentication is required.' }); return; }
@@ -53,7 +67,14 @@ export function createServer(pool, token, { logFailure = entry => console.error(
     try {
       const url = new URL(request.url, 'http://mobile.internal');
       if (url.search) throw new MobileError('invalid_request', 'Query parameters are not accepted.');
-      if (request.method === 'GET' && url.pathname === '/health') { send(response, 200, { ...await pool.health(), runtimeRevision: BROKER_RUNTIME_REVISION }); return; }
+      if (request.method === 'GET' && url.pathname === '/health') {
+        const health = await pool.health();
+        let applied = !requireReadyRevision;
+        if (requireReadyRevision) {
+          try { applied = await readyRevision() === BROKER_RUNTIME_REVISION; } catch { /* A missing or unreadable private marker is not ready. */ }
+        }
+        send(response, 200, { ...health, ok: health.ok === true && applied, runtimeRevision: BROKER_RUNTIME_REVISION }); return;
+      }
       const match = /^\/devices\/([^/]+)(?:\/(wake|sleep|lease|screenshot|observe|input|launch))?$/.exec(url.pathname);
       if (!match) throw new MobileError('not_found', 'This route does not exist.', 404);
       const [, room, action] = match;
@@ -121,7 +142,7 @@ export async function main() {
   const config = configuration();
   const pool = new DevicePool(config);
   await pool.initialize();
-  const server = createServer(pool, config.token);
+  const server = createServer(pool, config.token, { requireReadyRevision: config.requireReadyRevision });
   let sweeping = false;
   const timer = setInterval(async () => {
     if (sweeping) return;

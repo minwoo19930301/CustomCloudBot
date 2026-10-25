@@ -224,6 +224,15 @@ capture active Docker databases or a token already used for production rooms.
 The seed uses a unique instance ID for each room and creates no login account.
 The golden guest must not contain a common active SSH key/password. Each room's
 broker is enabled after its private environment is installed.
+The guest-only `MOBILE_REQUIRE_READY_REVISION=true` setting also gates `/health`:
+loaded code is not ready until its revision matches the root-owned persistent
+`/etc/customcloudbot-mobile.ready-revision`. Cloud-init writes a pending marker,
+then atomically renames it only after the broker restart succeeds. This prevents
+an early health response from racing that restart. The marker persists across
+normal reboots, when per-instance cloud-init commands do not run again. The host
+broker does not enable this gate. Do not add `After=cloud-final.service` while
+cloud-final synchronously restarts the broker; that would create an ordering wait.
+
 
 SSH stays disabled in the sealed guest. The instance seed sets
 `ssh_genkeytypes: []` to skip unnecessary host-key generation during TCG boot.

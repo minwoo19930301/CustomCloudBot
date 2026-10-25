@@ -46,6 +46,8 @@ function jsonList(env, key) {
 export function configuration(env = process.env) {
   const image = env.MOBILE_ANDROID_IMAGE || '';
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,255}$/.test(image)) throw new Error('MOBILE_ANDROID_IMAGE must name the operator-approved Android image');
+  const readyRevisionFlag = env.MOBILE_REQUIRE_READY_REVISION || 'false';
+  if (!['true', 'false'].includes(readyRevisionFlag)) throw new Error('MOBILE_REQUIRE_READY_REVISION must be true or false');
   const token = env.MOBILE_BROKER_TOKEN || '';
   if (token.length < 32) throw new Error('MOBILE_BROKER_TOKEN must contain at least 32 characters');
   const dataDir = env.MOBILE_DATA_DIR || '/var/lib/customcloudbot-mobile';
@@ -62,6 +64,7 @@ export function configuration(env = process.env) {
   if (socket && (!path.isAbsolute(socket) || Buffer.byteLength(socket) > 100 || /[\x00-\x1f]/.test(socket))) throw new Error('MOBILE_LISTEN_SOCKET must be a short absolute Unix socket path');
   return {
     token, image, dataDir, devices, network, externalContainers, inputIme, socket,
+    requireReadyRevision: readyRevisionFlag === 'true',
     host: env.MOBILE_LISTEN_HOST || '127.0.0.1',
     port: envInt(env, 'MOBILE_LISTEN_PORT', 8091, 1024, 65535),
     maxSlots: envInt(env, 'MOBILE_MAX_SLOTS', 10, 1, 100),
