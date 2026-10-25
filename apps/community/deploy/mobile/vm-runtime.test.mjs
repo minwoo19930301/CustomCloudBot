@@ -30,9 +30,10 @@ async function fixture(t) {
     }
     if (command === '/usr/bin/qemu-img') {
       if (args[0] === 'info') return {stdout:JSON.stringify(imageInfo)};
-      assert.deepEqual(args.slice(0, 7), ['create', '-f', 'qcow2', '-F', 'qcow2', '-b', path.join(dataDir, 'base/golden.qcow2')]);
+      assert.deepEqual(args.slice(0, 6), ['create', '-f', 'qcow2', '-F', 'qcow2', '-b']);
+      assert.equal(path.dirname(args[6]), path.join(dataDir, 'base'));
       assert.equal(args.at(-1), '12G');
-      await writeFile(args.at(-2), 'overlay', {mode:0o640});
+      await writeFile(args.at(-2), 'overlay referencing ' + args[6], {mode:0o640});
       return {stdout:''};
     }
     assert.equal(command, '/opt/customcloudbot-mobile/seed-venv/bin/python');
@@ -44,11 +45,57 @@ async function fixture(t) {
     await onSeed?.();
     return {stdout:''};
   };
-  const runtime = createVMRuntime(env, {run, controllerUid:process.getuid(), diskSpace:async () => ({bavail:BigInt(freeGiB) * 1024n ** 3n, bsize:1n})});
+  const dependencies = {run, controllerUid:process.getuid(), diskSpace:async () => ({bavail:BigInt(freeGiB) * 1024n ** 3n, bsize:1n})};
+  const runtime = createVMRuntime(env, dependencies);
   const spec = {roomId:A, slot:0, unitName:`customcloudbot-mobile-vm@${A}.service`, port:18091,
     dataDir:path.join(dataDir, 'rooms', A), token:TOKEN};
-  return {runtime, spec, env, dataDir, calls, states, failSeed:() => {seedFails = true;}, onSeed:callback => {onSeed = callback;}, imageInfo:info => {imageInfo = info;}, freeSpace:gib => {freeGiB = gib;}};
+  return {runtime, spec, env, dependencies, dataDir, calls, states, failSeed:() => {seedFails = true;}, onSeed:callback => {onSeed = callback;}, imageInfo:info => {imageInfo = info;}, freeSpace:gib => {freeGiB = gib;}};
 }
+
+test('golden image selection accepts only a bounded basename within the base directory', () => {
+  const config = vmRuntimeConfiguration({});
+  assert.equal(config.goldenImage, path.join(config.baseDir, 'golden.qcow2'));
+  for (const name of ['golden-v2.qcow2', 'golden-2026_10-25.qcow2', 'golden-' + 'a'.repeat(67) + '.qcow2']) {
+    assert.equal(vmRuntimeConfiguration({MOBILE_VM_GOLDEN_BASENAME:name}).goldenImage, path.join(config.baseDir, name));
+  }
+  for (const name of ['', 'golden-.qcow2', 'golden-v2.raw', 'golden-V2.qcow2', 'other.qcow2',
+    '../golden.qcow2', '/tmp/golden.qcow2', 'base/golden.qcow2', 'golden-v2.qcow2\n', 'golden-v2.qcow2\r',
+    'golden-v2.qcow2\0', 'golden-v2.qcow2,format=raw', 'golden-' + 'a'.repeat(68) + '.qcow2', 123]) {
+    assert.throws(() => vmRuntimeConfiguration({MOBILE_VM_GOLDEN_BASENAME:name}), /configuration/);
+  }
+});
+
+test('switching golden image only changes new overlays and preserves existing disks and their original base', async t => {
+  const {runtime, spec, env, dependencies, dataDir, calls} = await fixture(t);
+  await runtime.provision(spec);
+  const disk = path.join(spec.dataDir, 'disk.qcow2'), metadata = path.join(spec.dataDir, 'runtime.json');
+  const originalDisk = await readFile(disk, 'utf8'), originalInode = (await stat(disk)).ino, originalMetadata = await readFile(metadata, 'utf8');
+  const previousBase = path.join(dataDir, 'base', 'golden.qcow2'), nextBase = path.join(dataDir, 'base', 'golden-v2.qcow2');
+  await writeFile(nextBase, 'replacement fixture', {mode:0o640});
+  const nextRuntime = createVMRuntime({...env, MOBILE_VM_GOLDEN_BASENAME:'golden-v2.qcow2'}, dependencies);
+  await nextRuntime.provision(spec);
+  assert.equal((await stat(disk)).ino, originalInode);
+  assert.equal(await readFile(disk, 'utf8'), originalDisk);
+  assert.equal(await readFile(metadata, 'utf8'), originalMetadata);
+  assert.equal(await readFile(previousBase, 'utf8'), 'fixture');
+  assert.equal(await readFile(nextBase, 'utf8'), 'replacement fixture');
+  await nextRuntime.start(spec);
+  await nextRuntime.stop(spec);
+  const second = {...spec, roomId:B, slot:1, port:18092, unitName:`customcloudbot-mobile-vm@${B}.service`, dataDir:path.join(dataDir, 'rooms', B)};
+  await nextRuntime.provision(second);
+  assert.equal(await readFile(path.join(second.dataDir, 'disk.qcow2'), 'utf8'), 'overlay referencing ' + nextBase);
+  assert.deepEqual(calls.filter(call => call.command === '/usr/bin/qemu-img' && call.args[0] === 'create').map(call => call.args[6]), [previousBase, nextBase]);
+  assert.ok(calls.filter(call => call.command === '/usr/bin/qemu-img').every(call => ['info', 'create'].includes(call.args[0])));
+});
+
+test('a missing or symlinked selected golden image cannot fall back or create an overlay', async t => {
+  const {spec, env, dependencies, dataDir, calls} = await fixture(t);
+  const runtime = createVMRuntime({...env, MOBILE_VM_GOLDEN_BASENAME:'golden-v2.qcow2'}, dependencies);
+  await assert.rejects(runtime.provision(spec));
+  await symlink(path.join(dataDir, 'base', 'golden.qcow2'), path.join(dataDir, 'base', 'golden-v2.qcow2'));
+  await assert.rejects(runtime.provision(spec));
+  assert.equal(calls.some(call => call.command === '/usr/bin/qemu-img' && call.args[0] === 'create'), false);
+});
 
 test('untrusted paths, units, slots, ports and tokens never reach a root command', async t => {
   const {runtime, spec, calls} = await fixture(t);

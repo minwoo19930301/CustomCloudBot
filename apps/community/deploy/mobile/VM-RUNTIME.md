@@ -164,6 +164,47 @@ second EnvironmentFile with a per-room token, guest network binding, and
 settings in the base file. This is a VM boundary: privileged Android, if required
 by the validated image, stays inside its own guest and is never host Docker.
 
+The golden must load `binder_linux` through `/etc/modules-load.d/android.conf`
+and order its binderfs mount after that load. The OCI guest's 2026-10-25 boot
+journal confirmed `dev-binderfs.mount` failed with `unknown filesystem type
+'binder'` even though a later manual `modprobe binder_linux` succeeded. A plain
+`binder /dev/binderfs binder defaults 0 0` fstab entry does not establish ordering
+against `systemd-modules-load.service`; a required local mount failure can send
+the guest into emergency mode.
+
+Install this fixed, root-owned 0644 file **in the golden before sealing** at
+`/etc/systemd/system/dev-binderfs.mount.d/order.conf`:
+
+```ini
+[Unit]
+Requires=systemd-modules-load.service
+After=systemd-modules-load.service
+```
+
+Keep the guest broker's `Requires=dev-binderfs.mount` and
+`After=dev-binderfs.mount` dependencies. A missing Binder module must still stop
+Android startup; do not mask the mount or report readiness from broker HTTP
+alone. The seed writes the same drop-in to preserve this rule during upgrades,
+but cloud-init `write_files` runs after the initial fstab mounts. Seed-only
+installation is therefore **not** a first-boot fix for an uncorrected golden.
+
+Before sealing, reboot a disposable guest from the corrected base and inspect
+the actual boot, without manually loading Binder first:
+
+```sh
+systemctl show dev-binderfs.mount -p Requires -p After -p ActiveState
+systemctl is-active systemd-modules-load.service dev-binderfs.mount
+test -c /dev/binderfs/binder-control
+journalctl -b -u systemd-modules-load.service -u dev-binderfs.mount --no-pager
+```
+
+The mount must be active with the module-loader dependencies present and no
+mount failure/emergency boot. After sealing, verify a fresh overlay's cold boot
+and a second sleep/wake, including real Android boot and a screenshot. A manual
+mount in the preparation guest does not satisfy this check. Never modify a
+golden backing file already used by saved overlays; prepare a separate corrected
+base and preserve each existing overlay's backing chain during migration.
+
 Before sealing, stop the guest broker, disable it until first boot's cloud-init
 restart, remove build credentials and authorized SSH keys, and clear build-only
 Android room data. Run `cloud-init clean --logs --machine-id` as the final guest

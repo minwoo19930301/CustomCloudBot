@@ -61,8 +61,20 @@ class SeedTests(unittest.TestCase):
         self.assertNotIn(token, docs['meta-data'].decode())
         self.assertEqual(data['users'], [])
         self.assertEqual(data['ssh_genkeytypes'], [])
-        self.assertEqual(files[2:], [{'path': '/opt/customcloudbot-mobile/' + name, 'owner': 'root:root', 'permissions': '0644', 'content': SOURCES[name]} for name in seed.SOURCE_NAMES])
+        self.assertEqual(files[3:], [{'path': '/opt/customcloudbot-mobile/' + name, 'owner': 'root:root', 'permissions': '0644', 'content': SOURCES[name]} for name in seed.SOURCE_NAMES])
         self.assertEqual(data['runcmd'][-1], ['systemctl', 'restart', 'customcloudbot-mobile.service'])
+
+    def test_seed_preserves_binder_mount_dependency_instead_of_ignoring_mount_failure(self):
+        docs = seed.seed_documents({'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}, SOURCES)
+        data = json.loads(docs['user-data'].decode().split('\n', 1)[1])
+        mount = [file for file in data['write_files'] if file['path'] == '/etc/systemd/system/dev-binderfs.mount.d/order.conf']
+        self.assertEqual(mount, [{'path': '/etc/systemd/system/dev-binderfs.mount.d/order.conf', 'owner': 'root:root', 'permissions': '0644',
+                                 'content': '[Unit]\nRequires=systemd-modules-load.service\nAfter=systemd-modules-load.service\n'}])
+        self.assertEqual(data['runcmd'][0], ['systemctl', 'daemon-reload'])
+        # The seed cannot retroactively fix an early mount failure, and must not
+        # mask that failure or replace the golden's filesystem configuration.
+        self.assertNotIn('/etc/fstab', [file['path'] for file in data['write_files']])
+        self.assertNotIn('mask', [argument for command in data['runcmd'] for argument in command])
 
     def test_seed_instance_changes_only_for_broker_code_not_token_or_mapping_order(self):
         request = {'roomId': ROOM, 'token': 'a' * 64, 'output': '/unused/seed.iso.tmp'}

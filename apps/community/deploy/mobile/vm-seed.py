@@ -58,6 +58,10 @@ def seed_documents(request, sources):
             {"path": "/etc/customcloudbot-mobile.instance.env", "owner": "root:root", "permissions": "0600", "content": instance_env},
             {"path": "/etc/systemd/system/customcloudbot-mobile.service.d/instance.conf", "owner": "root:root", "permissions": "0644",
              "content": "[Service]\nEnvironmentFile=/etc/customcloudbot-mobile.instance.env\n"},
+            # Preserve the golden image's early-boot ordering on updates. This
+            # runs after the first fstab mount, so the golden must contain it too.
+            {"path": "/etc/systemd/system/dev-binderfs.mount.d/order.conf", "owner": "root:root", "permissions": "0644",
+             "content": "[Unit]\nRequires=systemd-modules-load.service\nAfter=systemd-modules-load.service\n"},
             *[{"path": "/opt/customcloudbot-mobile/" + name, "owner": "root:root", "permissions": "0644", "content": sources[name]} for name in SOURCE_NAMES],
         ],
         "runcmd": [["systemctl", "daemon-reload"], ["systemctl", "enable", "customcloudbot-mobile.service"], ["systemctl", "restart", "customcloudbot-mobile.service"]],

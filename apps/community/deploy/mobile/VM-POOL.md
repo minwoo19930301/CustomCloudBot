@@ -56,6 +56,24 @@ host-mapped supplementary group. Do not make the socket world-writable.
 Operational verification must wake a disposable room, wait for `running`, and
 retrieve a real screenshot/observation; then test sleep and persisted restart.
 
+## Golden boot preflight
+
+The sealed guest must contain `binder_linux` in its modules-load configuration
+and a root-owned `/etc/systemd/system/dev-binderfs.mount.d/order.conf` with both
+`Requires=systemd-modules-load.service` and
+`After=systemd-modules-load.service`. Keep the broker dependent on
+`dev-binderfs.mount`. This prevents fstab from attempting Binder before the
+module loader has completed; the missing order caused a confirmed OCI guest
+`unknown filesystem type 'binder'` mount failure and emergency boot.
+
+The seed preserves this drop-in on upgrades, but its `write_files` stage is too
+late to prevent a fresh guest's first mount failure. Correct the golden first,
+as described in [VM-RUNTIME.md](VM-RUNTIME.md#golden-guest-requirements). Verify a
+disposable guest's cold reboot with the mount active and no manual `modprobe`,
+then verify a fresh sealed overlay, actual Android boot, screenshot, and another
+sleep/wake. A running QEMU or reachable broker is insufficient. Preserve existing
+overlay backing chains when introducing a corrected golden image.
+
 ## Credential rotation
 
 The master broker token also derives all per-room guest tokens. The existing

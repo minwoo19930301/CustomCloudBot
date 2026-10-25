@@ -37,14 +37,17 @@ export function runVMCommand(command, args, {input, signal, timeoutMs = 30000} =
 export function vmRuntimeConfiguration(env = process.env) {
   const dataDir = env.MOBILE_VM_DATA_DIR || '/var/lib/customcloudbot-mobile-vm';
   const baseDir = path.join(dataDir, 'base');
+  const goldenBasename = env.MOBILE_VM_GOLDEN_BASENAME ?? 'golden.qcow2';
+  if (typeof goldenBasename !== 'string' || goldenBasename.length > 80 || !/^golden(?:-[a-z0-9_-]+)?\.qcow2$/.test(goldenBasename))
+    throw new Error('Invalid private mobile VM runtime configuration');
   const config = {
-    dataDir, baseDir, goldenImage:path.join(baseDir, 'golden.qcow2'), kernel:path.join(baseDir, 'Image'), initrd:path.join(baseDir, 'initrd'),
+    dataDir, baseDir, goldenImage:path.join(baseDir, goldenBasename), kernel:path.join(baseDir, 'Image'), initrd:path.join(baseDir, 'initrd'),
     python:env.MOBILE_VM_SEED_PYTHON || '/opt/customcloudbot-mobile/seed-venv/bin/python',
     seedScript:env.MOBILE_VM_SEED_SCRIPT || '/opt/customcloudbot-mobile/vm-seed.py',
     systemctl:'/usr/bin/systemctl', qemuImg:'/usr/bin/qemu-img', id:'/usr/bin/id', user:'ccb-mobile-vm',
     maxSlots:Number(env.MOBILE_MAX_SLOTS || 10), basePort:Number(env.MOBILE_VM_BASE_PORT || 18091),
   };
-  if (![dataDir, config.python, config.seedScript].every(safePath) || !integer(config.maxSlots, 1, 100) || config.basePort !== 18091)
+  if (![dataDir, config.goldenImage, config.python, config.seedScript].every(safePath) || !integer(config.maxSlots, 1, 100) || config.basePort !== 18091)
     throw new Error('Invalid private mobile VM runtime configuration');
   return config;
 }
@@ -126,6 +129,8 @@ export function createVMRuntime(env = process.env, {run = runVMCommand, controll
       let exists = false;
       try {await lstat(target.disk); exists = true;} catch (error) {if (error.code !== 'ENOENT') throw error;}
       if (exists) {
+        // Existing overlays retain their original immutable backing image.
+        // Selecting a newer golden image applies only to newly created disks.
         await sameMetadata(spec);
         await check(target.disk, {writable:true, uid});
         await check(target.seed);
