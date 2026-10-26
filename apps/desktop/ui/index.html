@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'">
+  <title>CustomCloudBot Desktop</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="toolbar">
+    <div class="app-name">CustomCloudBot <span>Desktop</span></div>
+    <div class="connection"><span id="status-dot" class="status-dot"></span><span id="connection-label">연결 준비</span></div>
+    <nav>
+      <button id="external-link" class="subtle" hidden>외부 링크 열기</button>
+      <button id="toolbar-pause" class="subtle" hidden>일시정지</button>
+      <button id="show-app" class="subtle" hidden>대화로 돌아가기</button>
+      <button id="show-settings" class="subtle" hidden>연결 설정</button>
+    </nav>
+  </header>
+
+  <main id="setup">
+    <section class="intro">
+      <div class="mark" aria-hidden="true"><svg viewBox="0 0 80 80" fill="none"><path d="M21 52a13 13 0 0 1-1-26 21 21 0 0 1 39 3 12 12 0 0 1 0 24H21Z" stroke="currentColor" stroke-width="3"/><path d="M33 41h14m-7-7v14M29 63h22" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></div>
+      <p class="eyebrow">YOUR CLOUD. YOUR COMPUTER.</p>
+      <h1>대화에서,<br>내 컴퓨터까지.</h1>
+      <p class="summary">CustomCloudBot에 로그인하고 필요한 권한을 선택하세요.<br>이 앱이 켜져 있는 동안, 내 컴퓨터에서 작업을 이어갑니다.</p>
+      <div class="assurance"><span class="small-dot"></span>연결은 내가 허용할 때만 시작됩니다.</div>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="settings-card" aria-label="컴퓨터 연결 설정">
+      <div class="section-heading"><span class="step">01</span><h2>내 서비스에 로그인</h2></div>
+      <label for="service-url">서비스 주소</label>
+      <div class="input-action"><input id="service-url" type="url" placeholder="https://your-bot.example.com" autocomplete="url" spellcheck="false"><button id="login" class="secondary">서비스 열기</button></div>
+      <label for="computer-name">이 컴퓨터 이름</label>
+      <input id="computer-name" type="text" maxlength="80" autocomplete="off" placeholder="내 컴퓨터">
+
+      <div class="section-heading permissions-heading"><span class="step">02</span><h2>허용할 권한 선택</h2><span class="optional">기본 꺼짐</span></div>
+      <label class="capability"><input id="cap-files" type="checkbox"><span class="cap-icon">▤</span><span><strong>선택한 폴더의 파일</strong><small>파일 찾기 · 읽기 · 저장</small></span><span class="switch"></span></label>
+      <div id="folder-panel" class="folder-panel" hidden><ul id="folders"></ul><button id="choose-folders" class="text-button">접근할 폴더 선택</button></div>
+      <label class="capability"><input id="cap-terminal" type="checkbox"><span class="cap-icon terminal-icon">›_</span><span><strong>터미널 명령 실행</strong><small>현재 계정으로 실행 · 폴더 제한 밖에도 접근 가능</small></span><span class="switch"></span></label>
+      <label class="capability"><input id="cap-browser" type="checkbox"><span class="cap-icon">◎</span><span><strong>내 브라우저에서 링크 열기</strong><small>기본 브라우저로 HTTPS 주소 열기</small></span><span class="switch"></span></label>
+      <p class="scope-note">파일 내용과 명령 결과는 연결한 서비스로 전달됩니다. 터미널 권한은 이 컴퓨터의 현재 사용자 권한으로 실행됩니다.</p>
+      <button id="connect" class="primary">연결 허용 <span aria-hidden="true">↗</span></button>
+      <div class="connection-actions"><button id="pause" class="text-button" hidden>연결 일시정지</button><button id="revoke" class="text-button danger" hidden>연결 해제</button></div>
+    </section>
+
+    <section id="os-permissions" class="os-permissions" hidden>
+      <div><h2>macOS 개인정보 보호</h2><p>선택한 폴더가 macOS 보호로 차단된다면 설정에서 이 앱의 파일 접근 권한을 직접 허용할 수 있습니다.</p></div>
+      <div class="os-buttons"><button data-permission="files">전체 디스크 접근 <span>설정 열기 ↗</span></button></div>
+    </section>
+  </main>
+</body>
+</html>

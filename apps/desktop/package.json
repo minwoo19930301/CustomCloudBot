@@ -1,0 +1,19 @@
+{
+  "name": "@custom-cloud-bot/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A permission-controlled desktop companion for CustomCloudBot",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "package:mac": "node scripts/package.mjs darwin",
+    "package:desktop": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.0.0"
+  }
+}
