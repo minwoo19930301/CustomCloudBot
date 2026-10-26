@@ -97,6 +97,7 @@ async function loadState() {
   }
   // Every launch starts paused, including a previously authorized machine.
   if (credentials.token) statusMessage = '저장된 연결이 일시정지되어 있습니다. 연결 허용을 누르면 다시 시작합니다.';
+  else if (statusMessage === '운영체제 암호 저장소를 확인하고 있습니다.') statusMessage = '로그인한 뒤 이 컴퓨터에 허용할 권한을 선택하세요.';
 }
 
 function validateSettings(value, roots = config.roots) {
