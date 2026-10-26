@@ -19,13 +19,6 @@ function api({ asyncAvailable = true, legacyAvailable = true } = {}) {
   };
 }
 
-function forbidAsync(storage) {
-  for (const name of ['isAsyncEncryptionAvailable', 'encryptStringAsync', 'decryptStringAsync']) {
-    Object.defineProperty(storage, name, { get() { forbiddenCalls.push(name); assert.fail(`Mac must not initialize or inspect ${name}`); } });
-  }
-  return storage;
-}
-
 function forbidLegacy(storage) {
   for (const name of ['isEncryptionAvailable', 'encryptString', 'decryptString']) {
     Object.defineProperty(storage, name, { get() { forbiddenCalls.push(name); assert.fail(`Async platform must not inspect ${name}`); } });
@@ -48,65 +41,66 @@ test('non-Mac uses async storage with an explicit versioned encrypted provider e
   assert.equal(store.diagnostic().selfTest, 'passed');
 });
 
-test('Mac uses only Keychain legacy before and after restart and never initializes async storage', async () => {
-  const store = createSecureStore({ safeStorage: forbidAsync(api()), platform: 'darwin' });
+test('Mac uses async storage before and after restart without inspecting synchronous Keychain APIs', async () => {
+  const store = createSecureStore({ safeStorage: forbidLegacy(api()), platform: 'darwin' });
   assert.equal(await store.selfTest(), true);
-  assert.equal(store.diagnostic().async, 'disabled-on-macos');
+  assert.equal(store.diagnostic().async, 'ready');
   const encrypted = await store.encrypt('private-token');
   assert.equal(encrypted.includes(Buffer.from('private-token')), false);
-  assert.match(encrypted.toString(), /electron-macos-keychain-legacy/);
-  const restart = createSecureStore({ safeStorage: forbidAsync(api()), platform: 'darwin' });
+  assert.match(encrypted.toString(), /electron-async/);
+  const restart = createSecureStore({ safeStorage: forbidLegacy(api()), platform: 'darwin' });
   await restart.available();
   const decrypted = await restart.decrypt(encrypted);
   assert.equal(decrypted.result, 'private-token');
   assert.equal(decrypted.shouldReEncrypt, false);
 });
 
-test('Mac never starts a stalled async initialization before using Keychain', async () => {
+test('Mac async initialization timeout returns without accessing synchronous Keychain', async () => {
   let asyncCalls = 0;
-  const storage = api();
+  const storage = forbidLegacy(api());
   storage.isAsyncEncryptionAvailable = () => { asyncCalls += 1; return new Promise(() => {}); };
   const store = createSecureStore({ safeStorage: storage, platform: 'darwin', timeoutMs: 10 });
+  assert.equal(await store.selfTest(), false);
+  assert.equal(asyncCalls, 1);
+  assert.equal(store.diagnostic().async, 'timeout');
+  assert.equal(store.diagnostic().provider, null);
+  storage.isAsyncEncryptionAvailable = async () => true;
   assert.equal(await store.selfTest(), true);
-  assert.equal(asyncCalls, 0);
-  assert.equal(store.diagnostic().async, 'disabled-on-macos');
 });
 
-test('Mac rejects old async envelopes and pre-envelope records without initializing their backend', async () => {
+test('Mac rejects legacy envelopes without initializing their backend and accepts async records', async () => {
   for (const initializeFirst of [false, true]) {
-    const store = createSecureStore({ safeStorage: forbidAsync(api()), platform: 'darwin' });
+    const store = createSecureStore({ safeStorage: forbidLegacy(api()), platform: 'darwin' });
     if (initializeFirst) assert.equal(await store.selfTest(), true);
-    for (const record of [envelope('electron-async'), Buffer.from('async-cipher:old-record')]) {
-      await assert.rejects(store.decrypt(record), { code: 'SECURE_STORAGE_RECONNECT_REQUIRED' });
-    }
-    assert.equal((await store.decrypt(envelope('electron-macos-keychain-legacy'))).result, 'old-record');
+    await assert.rejects(store.decrypt(envelope('electron-macos-keychain-legacy')), { code: 'SECURE_STORAGE_RECONNECT_REQUIRED' });
+    for (const record of [envelope('electron-async'), Buffer.from('async-cipher:old-record')]) assert.equal((await store.decrypt(record)).result, 'old-record');
     assert.equal(await store.selfTest(), true);
   }
 });
 
-test('Mac fails closed without available Keychain instead of trying async storage', async () => {
-  const store = createSecureStore({ safeStorage: forbidAsync(api({ legacyAvailable: false })), platform: 'darwin' });
+test('Mac fails closed without async storage instead of trying synchronous Keychain', async () => {
+  const store = createSecureStore({ safeStorage: forbidLegacy(api({ asyncAvailable: false })), platform: 'darwin' });
   assert.equal(await store.selfTest(), false);
   await assert.rejects(store.encrypt('private-token'), /secure_storage_unavailable/);
-  await assert.rejects(store.decrypt(envelope('electron-macos-keychain-legacy')), /secure_storage_unavailable/);
-  assert.equal(store.diagnostic().legacy, 'unavailable');
-  const incomplete = forbidAsync(api()); delete incomplete.decryptString;
+  await assert.rejects(store.decrypt(envelope('electron-async')), /secure_storage_unavailable/);
+  assert.equal(store.diagnostic().async, 'unavailable');
+  const incomplete = forbidLegacy(api()); delete incomplete.decryptStringAsync;
   const missing = createSecureStore({ safeStorage: incomplete, platform: 'darwin' });
   assert.equal(await missing.available(), false);
-  assert.equal(missing.diagnostic().legacy, 'missing-api');
+  assert.equal(missing.diagnostic().async, 'missing-api');
 });
 
-test('Mac Keychain errors never switch backends and retries remain legacy only', async () => {
-  for (const method of ['isEncryptionAvailable', 'encryptString', 'decryptString']) {
-    const storage = forbidAsync(api());
+test('Mac async storage errors never access legacy storage and can retry asynchronously', async () => {
+  for (const method of ['isAsyncEncryptionAvailable', 'encryptStringAsync', 'decryptStringAsync']) {
+    const storage = forbidLegacy(api());
     const original = storage[method];
-    storage[method] = () => { throw new Error('keychain-error'); };
+    storage[method] = async () => { throw new Error('keychain-error'); };
     const store = createSecureStore({ safeStorage: storage, platform: 'darwin' });
     assert.equal(await store.selfTest(), false);
     assert.equal(store.diagnostic().provider, null);
     storage[method] = original;
     assert.equal(await store.selfTest(), true);
-    assert.equal(store.diagnostic().provider, 'electron-macos-keychain-legacy');
+    assert.equal(store.diagnostic().provider, 'electron-async');
   }
 });
 
@@ -116,6 +110,16 @@ test('async initialization timeout is diagnosed and never falls back to legacy',
   assert.equal(await store.selfTest(), false);
   assert.equal(store.diagnostic().async, 'timeout');
   assert.equal(store.diagnostic().provider, null);
+});
+
+test('Mac encryption and decryption waits are bounded without synchronous fallback', async () => {
+  for (const method of ['encryptStringAsync', 'decryptStringAsync']) {
+    const storage = forbidLegacy(api());
+    storage[method] = () => new Promise(() => {});
+    const store = createSecureStore({ safeStorage: storage, platform: 'darwin', timeoutMs: 10 });
+    const operation = method === 'encryptStringAsync' ? store.encrypt('private-token') : store.decrypt(envelope('electron-async'));
+    await assert.rejects(operation, { code: 'SECURE_STORAGE_TIMEOUT' });
+  }
 });
 
 test('Linux basic_text is refused for both new encryption and existing decryption', async () => {
