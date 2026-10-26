@@ -1,10 +1,14 @@
 const HEADER = 'CCB-SECURE-STORE-1\n';
 
 export function createSecureStore({ safeStorage, platform = process.platform, timeoutMs = 5000, onDiagnostic = () => {} }) {
+  // Electron 45 can deadlock macOS Keychain when async and legacy storage are
+  // initialized in the same process. Pin one backend for this process lifetime.
+  const selectedProvider = platform === 'darwin' ? 'electron-macos-keychain-legacy' : 'electron-async';
   let provider = null;
   let diagnostic = { async: 'unchecked', legacy: 'not-attempted', provider: null, selfTest: 'unchecked' };
   const report = patch => { diagnostic = { ...diagnostic, ...patch }; onDiagnostic({ ...diagnostic }); };
   const unavailable = () => Object.assign(new Error('secure_storage_unavailable'), { code: 'SECURE_STORAGE_UNAVAILABLE' });
+  const reconnectRequired = () => Object.assign(new Error('secure_storage_reconnect_required'), { code: 'SECURE_STORAGE_RECONNECT_REQUIRED' });
   async function bounded(promise) {
     let timer;
     try {
@@ -13,6 +17,19 @@ export function createSecureStore({ safeStorage, platform = process.platform, ti
   }
   async function available() {
     if (provider) return true;
+    if (platform === 'darwin') {
+      report({ async: 'disabled-on-macos' });
+      if (!['isEncryptionAvailable', 'encryptString', 'decryptString'].every(name => typeof safeStorage[name] === 'function')) {
+        report({ legacy: 'missing-api' }); return false;
+      }
+      try {
+        if (safeStorage.isEncryptionAvailable()) {
+          provider = selectedProvider; report({ legacy: 'ready', provider }); return true;
+        }
+        report({ legacy: 'unavailable' });
+      } catch { report({ legacy: 'error' }); }
+      return false;
+    }
     if (platform === 'linux' && ['basic_text', 'unknown'].includes(safeStorage.getSelectedStorageBackend?.())) {
       report({ async: 'insecure-backend', provider: null }); return false;
     }
@@ -20,20 +37,10 @@ export function createSecureStore({ safeStorage, platform = process.platform, ti
     else {
       try {
         if (await bounded(safeStorage.isAsyncEncryptionAvailable())) {
-          provider = 'electron-async'; report({ async: 'ready', provider }); return true;
+          provider = selectedProvider; report({ async: 'ready', provider }); return true;
         }
         report({ async: 'unavailable' });
       } catch (error) { report({ async: error?.code === 'SECURE_STORAGE_TIMEOUT' ? 'timeout' : 'error' }); }
-    }
-    // Electron 45 retains the macOS Keychain-backed synchronous API. This is
-    // never a plaintext or Linux basic_text fallback. Remove when upgrading46.
-    if (platform === 'darwin' && typeof safeStorage.isEncryptionAvailable === 'function') {
-      try {
-        if (safeStorage.isEncryptionAvailable()) {
-          provider = 'electron-macos-keychain-legacy'; report({ legacy: 'ready', provider }); return true;
-        }
-        report({ legacy: 'unavailable' });
-      } catch { report({ legacy: 'error' }); }
     }
     return false;
   }
@@ -57,9 +64,12 @@ export function createSecureStore({ safeStorage, platform = process.platform, ti
       selected = envelope.provider;
       ciphertext = Buffer.from(envelope.ciphertext, 'base64');
     }
+    // Do not migrate by initializing the other backend. The user can reconnect
+    // through native consent; their existing encrypted file stays untouched.
+    if (selected !== selectedProvider) throw reconnectRequired();
+    if (!await available()) throw unavailable();
     if (selected === 'electron-macos-keychain-legacy') {
-      if (platform !== 'darwin' || typeof safeStorage.decryptString !== 'function' || !safeStorage.isEncryptionAvailable()) throw unavailable();
-      return { result: safeStorage.decryptString(ciphertext), shouldReEncrypt: provider === 'electron-async' };
+      return { result: safeStorage.decryptString(ciphertext), shouldReEncrypt: false };
     }
     if (typeof safeStorage.decryptStringAsync !== 'function') throw unavailable();
     return bounded(safeStorage.decryptStringAsync(ciphertext));

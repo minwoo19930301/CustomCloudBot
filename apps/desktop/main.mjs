@@ -94,7 +94,8 @@ async function loadState() {
       if (decrypted.shouldReEncrypt) await persist();
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') statusMessage = '저장한 연결을 읽지 못했습니다. 권한을 선택해 다시 연결해 주세요.';
+    if (error.code === 'SECURE_STORAGE_RECONNECT_REQUIRED') statusMessage = '이전 버전의 연결 저장 방식을 사용할 수 없습니다. 권한을 선택해 다시 연결해 주세요.';
+    else if (error.code !== 'ENOENT') statusMessage = '저장한 연결을 읽지 못했습니다. 권한을 선택해 다시 연결해 주세요.';
   }
   // Every launch starts paused, including a previously authorized machine.
   if (credentials.token) statusMessage = '저장된 연결이 일시정지되어 있습니다. 연결 허용을 누르면 다시 시작합니다.';

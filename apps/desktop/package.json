@@ -1,6 +1,6 @@
 {
   "name": "@custom-cloud-bot/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A permission-controlled desktop companion for CustomCloudBot",
   "license": "GPL-3.0-only",
