@@ -1,0 +1,16 @@
+.app-install-dialog { width: min(440px, calc(100vw - 32px)); }
+.app-install-options { display: grid; gap: 12px; }
+.app-install-option {
+  display: grid; gap: 6px; width: 100%; padding: 18px;
+  border: 1px solid var(--line); border-radius: 16px;
+  background: #ffffff38; color: var(--text); font: inherit;
+  text-align: left; text-decoration: none; cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+.app-install-option strong { font-size: 16px; font-weight: 650; }
+.app-install-option span, .app-install-option small { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.app-install-option:hover:not(:disabled):not([aria-disabled="true"]),
+.app-install-option:focus-visible { background: #ffffff70; border-color: var(--glass-accent); }
+.app-install-option:disabled, .app-install-option[aria-disabled="true"] { cursor: default; opacity: 1; }
+.app-install-option:disabled strong, .app-install-option[aria-disabled="true"] strong { opacity: .6; }
+.app-install-note { margin: 9px 4px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

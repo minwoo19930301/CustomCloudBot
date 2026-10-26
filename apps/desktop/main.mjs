@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createExecutor } from './executor.mjs';
 import { createSecureStore } from './secure-store.mjs';
+import { initialDesktopSettings } from './release-config.mjs';
 import { normalizeAppUrl, isTrustedSender, isSameOriginUrl, externalHttpsUrl, capabilityList, consentDetails, safeError, validJob, isStaleResultError } from './security.mjs';
 
 app.setName('CustomCloudBot Desktop');
@@ -73,8 +74,8 @@ function persist({ secret = true } = {}) {
 
 async function loadState() {
   try {
-    const saved = JSON.parse(await fs.readFile(paths().config, 'utf8'));
-    config = validateSettings(saved, saved.roots);
+    const saved = await initialDesktopSettings(paths().config, path.join(here, 'release.json'));
+    if (saved) config = validateSettings(saved, saved.roots);
     if (config.origin) {
       settingsVisible = false;
       void ensureCloud().catch(() => { showSettings(true); setMessage('서비스를 열지 못했습니다. 연결 설정에서 주소를 확인해 주세요.'); });

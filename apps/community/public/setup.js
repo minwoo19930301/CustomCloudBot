@@ -192,6 +192,19 @@ export function createBotSetupUI({ api, getSession, onSaved, toast }) {
     }
     content.append(block);
   }
+  function renderDesktopDownloads(data) {
+    const download = (Array.isArray(data.desktopDownloads) ? data.desktopDownloads : []).find(item => item.platform === "macos" && item.arch === "arm64");
+    const block = section("데스크톱 앱 배포", "Mac · Apple Silicon 설치 파일을 연결합니다. 저장한 공개 링크는 모든 사용자의 ‘앱 받기’에 표시됩니다.");
+    const fields = submitForm(block, "다운로드 설정 저장", (_, form) => {
+      const value = new FormData(form), url = String(value.get("downloadUrl") || "").trim();
+      const downloads = url ? [{ platform: "macos", arch: "arm64", version: String(value.get("downloadVersion") || "").trim(), url, notarized: download?.notarized === true }] : [];
+      void save("/api/admin/setup/desktop-downloads", { downloads }, url ? "데스크톱 다운로드를 연결했습니다." : "데스크톱 다운로드 링크를 숨겼습니다.");
+    });
+    field(fields, "공개 다운로드 주소", "downloadUrl", { type: "url", value: download?.url, maxLength: 2048, placeholder: "https://…", note: "실제 설치 파일의 HTTPS 주소를 넣어주세요. 비워서 저장하면 다운로드 링크를 숨깁니다." });
+    field(fields, "버전", "downloadVersion", { value: download?.version || "0.1.0", maxLength: 80 });
+    if (download?.notarized !== true) block.append(element("p", "setup-note", "Apple 공증 전 버전으로 안내됩니다. macOS에서 실행이 차단될 수 있습니다."));
+    content.append(block);
+  }
   function renderResources(data) {
     const resources = Array.isArray(data.resources) ? data.resources : [];
     const block = section("키 보관함", "가져온 키 모음을 서버 Vault에 암호화해 보관합니다. 키 값은 표시하지 않습니다. 위 AI API 목록의 연결만 AI 실행에 사용되며, 그 밖의 항목은 해당 서비스 연결이 필요합니다.");
@@ -273,7 +286,7 @@ export function createBotSetupUI({ api, getSession, onSaved, toast }) {
   }
   function render(data) {
     content.replaceChildren();
-    renderProfile(data); renderProviders(data); renderResources(data); renderGateway(data); renderBackend(data); renderSubscriptions(data); renderGuide();
+    renderProfile(data); renderDesktopDownloads(data); renderProviders(data); renderResources(data); renderGateway(data); renderBackend(data); renderSubscriptions(data); renderGuide();
     const exportButton = button("설정 레시피 내보내기", () => void exportRecipe(), "text-button"); exportButton.dataset.setupAction = "";
     const exportRow = element("div", "setup-export"); exportRow.append(exportButton, element("p", "setup-note", "봇 이름·배포 기록·AI 연결 주소를 JSON으로 저장합니다. 키와 토큰은 포함되지 않습니다.")); content.append(exportRow);
   }

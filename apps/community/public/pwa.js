@@ -27,7 +27,13 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
   const dialog = document.querySelector("#pwa-dialog");
   const dialogTitle = document.querySelector("#pwa-dialog-title");
   const dialogMessage = document.querySelector("#pwa-dialog-message");
-  const state = { session: null, registration: null, config: null, subscription: null, deferredInstall: null, epoch: 0, pushBusy: false, installBusy: false, installed: false, destroyed: false, installHelpShown: false,
+  const installDialog = document.querySelector("#app-install-dialog");
+  const pwaInstallButton = document.querySelector("#install-pwa-button");
+  const pwaInstallStatus = document.querySelector("#install-pwa-status");
+  const desktopDownload = document.querySelector("#install-desktop-link");
+  const desktopDownloadStatus = document.querySelector("#install-desktop-status");
+  const desktopDownloadNote = document.querySelector("#install-desktop-note");
+  const state = { session: null, registration: null, config: null, subscription: null, deferredInstall: null, epoch: 0, downloadEpoch: 0, pushBusy: false, installBusy: false, installed: false, destroyed: false, installHelpShown: false,
     supported: window.isSecureContext !== false && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window };
   const current = (epoch) => !state.destroyed && state.epoch === epoch && Boolean(state.session?.user?.id) && (!getSession || getSession()?.user?.id === state.session.user.id);
   const showDialog = (title, message) => {
@@ -49,9 +55,45 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
     installButtons.forEach((button) => {
       button.classList.remove("is-hidden");
       button.hidden = false;
-      button.disabled = state.installBusy || standalone || state.installed;
-      button.textContent = standalone ? "앱으로 사용 중" : state.installed ? "앱 설치됨" : state.deferredInstall ? "앱으로 설치" : "앱으로 만들기";
+      button.disabled = state.installBusy;
+      button.textContent = "앱 받기";
     });
+    if (pwaInstallButton) pwaInstallButton.disabled = state.installBusy || standalone || state.installed;
+    if (pwaInstallStatus) pwaInstallStatus.textContent = standalone ? "PWA로 사용 중" : state.installed ? "PWA 설치됨" : "브라우저에서 홈 화면이나 Dock에 추가";
+  };
+  const setDesktopDownload = (download, message) => {
+    if (desktopDownload) {
+      desktopDownload.removeAttribute("href");
+      desktopDownload.setAttribute("aria-disabled", String(!download));
+      desktopDownload.tabIndex = download ? 0 : -1;
+      if (download) desktopDownload.setAttribute("href", download.url);
+    }
+    if (desktopDownloadStatus) desktopDownloadStatus.textContent = message;
+    if (desktopDownloadNote) {
+      desktopDownloadNote.hidden = !download || download.notarized === true;
+      desktopDownloadNote.textContent = download && download.notarized !== true ? "Apple 공증 전 초기 버전입니다. macOS에서 실행이 차단될 수 있습니다." : "";
+    }
+  };
+  const showInstallChoices = async () => {
+    if (state.destroyed || state.installBusy || typeof window.customCloudBotDesktop?.openSettings === "function") return;
+    if (!installDialog) { showInstallHelp(); return; }
+    renderInstall();
+    setDesktopDownload(null, "다운로드 확인 중…");
+    if (!installDialog.open) installDialog.showModal();
+    const epoch = ++state.downloadEpoch;
+    try {
+      const result = await api("/api/desktop/downloads");
+      if (state.destroyed || epoch !== state.downloadEpoch) return;
+      const download = result?.downloads?.find((item) => {
+        if (item?.platform !== "macos" || item.arch !== "arm64" || typeof item.url !== "string") return false;
+        try { const url = new URL(item.url); return url.protocol === "https:" && !url.username && !url.password; }
+        catch { return false; }
+      });
+      if (!download) { setDesktopDownload(null, "데스크톱 다운로드를 아직 준비 중입니다."); return; }
+      setDesktopDownload(download, `Mac · Apple Silicon${typeof download.version === "string" && download.version ? ` · v${download.version}` : ""}`);
+    } catch {
+      if (!state.destroyed && epoch === state.downloadEpoch) setDesktopDownload(null, "다운로드 정보를 불러오지 못했습니다. 잠시 후 다시 열어주세요.");
+    }
   };
   const renderPush = () => {
     const permission = state.supported ? Notification.permission : "default";
@@ -160,19 +202,24 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
     if (state.installBusy) return;
     if (isStandalone() || state.installed) return;
     const prompt = state.deferredInstall;
-    if (!prompt) { showInstallHelp(); return; }
+    if (!prompt) { installDialog?.close(); showInstallHelp(); return; }
     state.deferredInstall = null;
     state.installBusy = true;
     renderInstall();
-    try { await prompt.prompt(); await prompt.userChoice; }
-    catch { showInstallHelp(); }
+    try { const prompted = prompt.prompt(); installDialog?.close(); await prompted; await prompt.userChoice; }
+    catch { installDialog?.close(); showInstallHelp(); }
     finally { state.installBusy = false; renderInstall(); }
   };
   const onPrompt = (event) => { event.preventDefault(); state.deferredInstall = event; renderInstall(); };
   const onInstalled = () => { state.deferredInstall = null; state.installed = true; renderInstall(); toast("앱이 설치되었습니다."); };
   const onPush = () => state.subscription ? disablePush() : enablePush();
   const onBackdrop = (event) => { if (event.target === dialog) dialog.close(); };
-  installButtons.forEach((button) => button.addEventListener("click", install));
+  const onInstallBackdrop = (event) => { if (event.target === installDialog) installDialog.close(); };
+  const onDesktopDownload = (event) => { if (!desktopDownload?.getAttribute("href")) event.preventDefault(); };
+  installButtons.forEach((button) => button.addEventListener("click", showInstallChoices));
+  pwaInstallButton?.addEventListener("click", install);
+  desktopDownload?.addEventListener("click", onDesktopDownload);
+  installDialog?.addEventListener("click", onInstallBackdrop);
   pushButton?.addEventListener("click", onPush);
   testPushButton?.addEventListener("click", testPush);
   dialog?.addEventListener("click", onBackdrop);
@@ -188,7 +235,7 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
       // Each permitted origin installs its own manifest without cross-origin navigation.
       renderInstall();
       if(!isStandalone() && window.location?.search?.includes("install=1") && !state.installHelpShown) {
-        state.installHelpShown=true;showInstallHelp();
+        state.installHelpShown=true;void showInstallChoices();
       }
       return false;
     },
@@ -223,7 +270,11 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
     destroy() {
       state.destroyed = true;
       state.epoch++;
-      installButtons.forEach((button) => button.removeEventListener("click", install));
+      state.downloadEpoch++;
+      installButtons.forEach((button) => button.removeEventListener("click", showInstallChoices));
+      pwaInstallButton?.removeEventListener("click", install);
+      desktopDownload?.removeEventListener("click", onDesktopDownload);
+      installDialog?.removeEventListener("click", onInstallBackdrop);
       pushButton?.removeEventListener("click", onPush);
       testPushButton?.removeEventListener("click", testPush);
       dialog?.removeEventListener("click", onBackdrop);

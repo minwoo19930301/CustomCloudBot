@@ -3,12 +3,15 @@ import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { releaseMetadata } from '../release-config.mjs';
 
 const run = promisify(execFile);
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metadata = JSON.parse(await fs.readFile(path.join(source, 'package.json'), 'utf8'));
+const release = releaseMetadata(process.env.CCB_DESKTOP_APP_ORIGIN);
 const platform = process.argv[2] || process.platform;
 const arch = process.argv[3] || process.arch;
 if (platform !== 'darwin' || !['arm64', 'x64'].includes(arch)) throw new Error('This first release packages macOS arm64 or x64.');
@@ -19,10 +22,22 @@ const destination = path.join(source, 'dist');
 try {
   await fs.mkdir(staging);
   // Explicit inclusion keeps developer files, private config and workspace dependencies out of the application.
-  for (const item of ['main.mjs', 'preload.cjs', 'cloud-preload.cjs', 'security.mjs', 'secure-store.mjs', 'executor.mjs', 'ui']) {
+  for (const item of ['main.mjs', 'preload.cjs', 'cloud-preload.cjs', 'security.mjs', 'secure-store.mjs', 'release-config.mjs', 'executor.mjs', 'ui']) {
     await fs.cp(path.join(source, item), path.join(staging, item), { recursive: true });
   }
   await fs.writeFile(path.join(staging, 'package.json'), JSON.stringify({ name: metadata.name, version: metadata.version, productName: 'CustomCloudBot Desktop', type: 'module', main: 'main.mjs', license: metadata.license }));
+  await fs.writeFile(path.join(staging, 'release.json'), JSON.stringify(release));
+  const notices = path.join(temporary, 'licenses');
+  await fs.mkdir(notices);
+  const electronPackage = createRequire(import.meta.url).resolve('electron/package.json');
+  const installedElectron = JSON.parse(await fs.readFile(electronPackage, 'utf8'));
+  if (installedElectron.version !== metadata.devDependencies.electron) throw new Error('Install the pinned Electron version before packaging its license notices.');
+  const electronDistribution = path.join(path.dirname(electronPackage), 'dist');
+  await Promise.all([
+    fs.copyFile(path.resolve(source, '../../LICENSE'), path.join(notices, 'CustomCloudBot-GPL-3.0.txt')),
+    fs.copyFile(path.join(electronDistribution, 'LICENSE'), path.join(notices, 'Electron-LICENSE.txt')),
+    fs.copyFile(path.join(electronDistribution, 'LICENSES.chromium.html'), path.join(notices, 'Chromium-LICENSES.html'))
+  ]);
   const iconset = path.join(temporary, 'app.iconset');
   await fs.mkdir(iconset);
   const logo = path.resolve(source, '../community/public/icons/app-logo-v3-512.png');
@@ -38,6 +53,7 @@ try {
     appBundleId: 'org.customcloudbot.desktop', appVersion: metadata.version, buildVersion: metadata.version,
     appCategoryType: 'public.app-category.productivity', platform, arch, icon,
     electronVersion: metadata.devDependencies.electron, asar: true, prune: false, overwrite: true,
+    extraResource: [notices],
     osxSign: { identity: identity || '-', identityValidation: Boolean(identity), type: 'development',
       preEmbedProvisioningProfile: false, optionsForFile: () => ({ hardenedRuntime: Boolean(identity) }) },
     extendInfo: { NSHumanReadableCopyright: 'CustomCloudBot contributors',

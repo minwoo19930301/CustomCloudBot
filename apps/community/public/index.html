@@ -27,6 +27,7 @@
     <link rel="stylesheet" href="/mobile-workspace.css" />
     <link rel="stylesheet" href="/model-picker.css" />
     <link rel="stylesheet" href="/browser-logins.css" />
+    <link rel="stylesheet" href="/app-install.css" />
   </head>
   <body>
     <svg
@@ -190,7 +191,7 @@
             role="status"
             aria-live="polite"
           ></p>
-          <button id="auth-install-button" class="outline-button auth-install-button is-hidden" type="button">홈 화면에 추가</button>
+          <button id="auth-install-button" class="outline-button auth-install-button is-hidden" type="button">앱 받기</button>
         </div>
       </section>
       <section id="workspace-view" class="workspace-view is-hidden">
@@ -244,7 +245,7 @@
               </div>
               <div class="profile-menu-section">
                 <button id="site-invite-button" class="profile-menu-item is-hidden" type="button">사용자 초대</button>
-                <button id="install-button" class="profile-menu-item is-hidden" type="button">앱으로 설치</button>
+                <button id="install-button" class="profile-menu-item is-hidden" type="button">앱 받기</button>
                 <button id="logout-button" class="profile-menu-item" type="button">로그아웃</button>
               </div>
             </dialog>
@@ -474,6 +475,28 @@
         <p id="invite-expires" class="expires-label"></p>
         <div class="modal-actions">
           <button class="primary-button modal-close" type="button">닫기</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="app-install-dialog" class="modal app-install-dialog" aria-labelledby="app-install-title">
+      <form method="dialog">
+        <div class="modal-head">
+          <h2 id="app-install-title">앱 받기</h2>
+          <button class="icon-button modal-close" type="submit" aria-label="닫기">×</button>
+        </div>
+        <div class="app-install-options">
+          <button id="install-pwa-button" class="app-install-option" type="button">
+            <strong>PWA로 받기</strong>
+            <span id="install-pwa-status">브라우저에서 홈 화면이나 Dock에 추가</span>
+          </button>
+          <div>
+            <a id="install-desktop-link" class="app-install-option" target="_blank" rel="noopener noreferrer" aria-disabled="true" tabindex="-1">
+              <strong>데스크톱 앱으로 받기</strong>
+              <span id="install-desktop-status" role="status" aria-live="polite">다운로드 확인 중…</span>
+              <small>설정에서 내 컴퓨터의 파일·터미널 연결</small>
+            </a>
+            <p id="install-desktop-note" class="app-install-note" hidden></p>
+          </div>
         </div>
       </form>
     </dialog>

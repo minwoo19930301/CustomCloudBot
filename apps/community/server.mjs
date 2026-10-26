@@ -1,4 +1,5 @@
 import { createOriginPolicy } from "./app-origin.mjs";
+import { desktopDownloads, validateDesktopDownloads } from "./desktop-downloads.mjs";
 import { authenticatedApiRatePolicy } from "./request-rate-policy.mjs";
 import { createServer } from "node:http";
 import {
@@ -212,7 +213,9 @@ export async function startCommunity(options = {}) {
   const chooseModel = (...args) => activeBackend() === "gateway" ? null : pool.choose(...args);
   const requestOrigins=createOriginPolicy({origin,appOrigin:env.COMMUNITY_APP_ORIGIN || "",production:env.NODE_ENV==="production",boundOrigin:()=>boundOrigin});
   const brand = () => ({name:setupVault.name,icon:"/icons/cloud-agent-v1-192.png",appOrigin:requestOrigins.appOrigin});
-  const setupView = () => setupVault.view({configured,activeBackend:activeBackend(),subscriptions:SUBSCRIPTION_CONNECTIONS});
+  const downloadCatalog = () => desktopDownloads({ COMMUNITY_DESKTOP_DOWNLOADS:
+    db.prepare("SELECT value FROM settings WHERE key='desktop-downloads'").get()?.value ?? env.COMMUNITY_DESKTOP_DOWNLOADS });
+  const setupView = () => ({ ...setupVault.view({configured,activeBackend:activeBackend(),subscriptions:SUBSCRIPTION_CONNECTIONS}), desktopDownloads: downloadCatalog() });
   const push = createPushService({ db, env, getName:()=>setupVault.name, sendImpl: options.pushSendImpl });
   const desktops = parseDesktops(env.COMMUNITY_DESKTOP_MAP,{sharedRoomId:env.COMMUNITY_SHARED_DESKTOP_ROOM,multiView:env.COMMUNITY_DESKTOP_VIEWS==="1"});
   const fixedDesktops = new Set(desktops.keys());
@@ -1270,6 +1273,8 @@ export async function startCommunity(options = {}) {
       if (req.headers["sec-fetch-site"] === "cross-site" && !publicNavigation)
         throw failure(403, "허용되지 않은 출처입니다.");
       if (url.pathname === "/api/brand" && method === "GET") return reply(res,200,brand());
+      if (url.pathname === "/api/desktop/downloads" && method === "GET")
+        return reply(res, 200, { downloads: downloadCatalog() });
       if (url.pathname === "/api/health" && method === "GET")
         return reply(res, 200, { ok: true, release: env.COMMUNITY_RELEASE ?? "development" });
       if (!url.pathname.startsWith("/api/")) {
@@ -1284,6 +1289,7 @@ export async function startCommunity(options = {}) {
           "/model-failover.mjs": ["model-failover.mjs", "text/javascript"],
           "/browser-logins.mjs": ["browser-logins.mjs", "text/javascript"],
           "/browser-logins.css": ["browser-logins.css", "text/css"],
+          "/app-install.css": ["app-install.css", "text/css"],
           "/model-picker.mjs": ["model-picker.mjs", "text/javascript"],
           "/model-catalog.mjs": ["model-catalog.mjs", "text/javascript"],
           "/model-icons.mjs": ["model-icons.mjs", "text/javascript"],
@@ -1671,6 +1677,11 @@ export async function startCommunity(options = {}) {
         }
         if (method !== "POST") throw failure(405,"허용되지 않은 요청입니다.");
         limit("setup:"+user.id,20);
+        if (url.pathname === "/api/admin/setup/desktop-downloads") {
+          const downloads = validateDesktopDownloads(body.downloads);
+          db.prepare("INSERT INTO settings(key,value) VALUES('desktop-downloads',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(downloads));
+          return reply(res, 200, setupView());
+        }
         if (url.pathname === "/api/admin/setup/verify") {
           if(["api", "auto"].includes(activeBackend())) {
             const listed=await pool.listModels();
