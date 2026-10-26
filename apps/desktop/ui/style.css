@@ -22,6 +22,7 @@ main { padding: 30px 20px; height: calc(100vh - 58px); overflow: auto; backgroun
 h1 { font-size: 20px; margin: 0 0 8px; letter-spacing: -.5px; }
 .description { color: #77707f; font-size: 13px; margin: 0 0 12px; }
 .message { font-size: 12px; line-height: 1.5; color: #76628e; margin: 0 0 20px; }
+.storage-retry { font-size: 12px; margin: -8px 0 8px; }
 .settings-card > label { display: block; margin: 14px 0 7px; font-size: 12px; color: #6a6273; }
 input[type=url], input[type=text] { width: 100%; height: 38px; padding: 0 10px; min-width: 0; background: #faf9fc; border: 1px solid #dfdbe6; border-radius: 8px; color: #393342; }
 .input-action { display: flex; gap: 8px; }

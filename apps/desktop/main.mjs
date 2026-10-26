@@ -29,6 +29,7 @@ let pollController = null;
 let pollTimer = null;
 let connecting = false;
 let loadingState = true;
+let checkingStorage = false;
 let storeQueue = Promise.resolve();
 let config = { origin: '', name: os.hostname(), roots: [], capabilities: { files: false, terminal: false, browser: false } };
 let credentials = { token: null, device: null, seenJobs: [], outbox: [], pairedCapabilities: [] };
@@ -52,6 +53,25 @@ function paths() {
 }
 
 async function encryptionAvailable() { return secureStore.available(); }
+
+function storageUnavailableMessage() {
+  if (secureStore.diagnostic().async === 'timeout') return process.platform === 'darwin'
+    ? 'macOS 키체인 승인 창이 응답을 기다리고 있을 수 있습니다. 승인 창을 확인한 뒤 암호 저장소를 다시 확인해 주세요.'
+    : '암호 저장소 응답이 지연되고 있습니다. 잠시 후 다시 확인해 주세요.';
+  return '운영체제 암호 저장소를 확인하지 못했습니다. 다시 확인해 주세요.';
+}
+
+async function retrySecureStorage() {
+  if (checkingStorage || loadingState || connecting || enabled || currentJob) return state();
+  checkingStorage = true;
+  setMessage('암호 저장소를 확인하고 있습니다.');
+  try {
+    // This probe never persists settings or credentials, pairs a device, or grants access.
+    storageAvailable = await secureStore.selfTest().catch(() => false);
+    setMessage(storageAvailable ? '암호 저장소를 확인했습니다. 컴퓨터 연결은 꺼져 있습니다.' : storageUnavailableMessage());
+  } finally { checkingStorage = false; notify(); }
+  return state();
+}
 
 async function atomicWrite(file, data) {
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -83,7 +103,7 @@ async function loadState() {
     notify();
   } catch {}
   storageAvailable = await secureStore.selfTest().catch(() => false);
-  if (!storageAvailable) { statusMessage = secureStore.diagnostic().async === 'timeout' ? '암호 저장소 응답이 지연되고 있습니다. 연결 설정에서 다시 시도해 주세요.' : '운영체제 암호 저장소를 확인하지 못했습니다. 연결 설정에서 다시 시도해 주세요.'; return; }
+  if (!storageAvailable) { statusMessage = storageUnavailableMessage(); return; }
   try {
     const decrypted = await secureStore.decrypt(await fs.readFile(paths().credential));
     if (!decrypted) throw new Error('secure_storage_unavailable');
@@ -117,7 +137,7 @@ function permissionStatus() {
 
 function state() {
   return { ...config, enabled, paired: Boolean(credentials.token), deviceName: credentials.device?.name || config.name,
-    settingsVisible, ownerLabel: credentials.ownerLabel || '', message: statusMessage, busy: connecting || loadingState, job: currentJob ? { tool: currentJob.tool } : null,
+    settingsVisible, ownerLabel: credentials.ownerLabel || '', message: statusMessage, busy: connecting || loadingState || checkingStorage, checkingStorage, job: currentJob ? { tool: currentJob.tool } : null,
     externalHost: pendingExternal ? new URL(pendingExternal).host : null,
     permissions: permissionStatus(), storageAvailable };
 }
@@ -345,7 +365,7 @@ async function revoke() {
 }
 
 async function connect(settings) {
-  if (connecting || currentJob) return state();
+  if (connecting || loadingState || checkingStorage || currentJob) return state();
   connecting = true; notify();
   try {
     const next = validateSettings(settings);
@@ -398,6 +418,7 @@ function installIPC() {
     showSettings(true);
   });
   handle('desktop:status', () => state());
+  handle('desktop:retry-storage', retrySecureStorage);
   handle('desktop:configure', async value => {
     if (enabled || currentJob) throw new Error('pause_before_configuring');
     const next = validateSettings(value);

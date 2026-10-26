@@ -29,6 +29,8 @@ The default build uses a local ad-hoc signature. It requires no paid Apple devel
 4. Choose **연결 허용**, check the account and permissions in the native dialog, and confirm.
 5. Ask in one of your own private conversations, for example “연결한 내 컴퓨터의 선택 폴더 목록을 보여줘”.
 
+If secure storage times out, check for a macOS Keychain approval dialog and handle it yourself. Then use **암호 저장소 다시 확인** in desktop settings. This bounded check updates storage availability only; it does not enable permissions, pair a computer, or write settings or credentials.
+
 No cloud address, personal account, API key, or computer permission is preconfigured in the repository. The companion needs a server version that includes `/api/local-computers` and the local-computer model tools. Shared rooms, monitor rooms, and other users' rooms cannot run local-computer tools.
 
 The app starts paused every time. Use the native application menu for pause or connection settings; settings are also available from the web account menu or **⌘,**. Logout or switching the web login pauses the local connection when checked before the next polling cycle. Connection revocation removes the device credential; closing the app stops active local commands before the process exits. Already completed file changes are not rolled back.

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktop', Object.freeze({
   status: () => ipcRenderer.invoke('desktop:status'),
+  retryStorage: () => ipcRenderer.invoke('desktop:retry-storage'),
   configure: (settings) => ipcRenderer.invoke('desktop:configure', settings),
   chooseFolders: () => ipcRenderer.invoke('desktop:folders'),
   connect: (settings) => ipcRenderer.invoke('desktop:connect', settings),

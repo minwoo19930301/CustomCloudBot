@@ -68,6 +68,20 @@ test('Mac async initialization timeout returns without accessing synchronous Key
   assert.equal(await store.selfTest(), true);
 });
 
+test('a retry recognizes late async initialization after an earlier timeout', async () => {
+  const storage = forbidLegacy(api());
+  let finishInitialization;
+  const initialization = new Promise(resolve => { finishInitialization = resolve; });
+  storage.isAsyncEncryptionAvailable = () => initialization;
+  const store = createSecureStore({ safeStorage: storage, platform: 'darwin', timeoutMs: 10 });
+  assert.equal(await store.selfTest(), false);
+  assert.equal(store.diagnostic().async, 'timeout');
+  finishInitialization(true);
+  assert.equal(await store.selfTest(), true);
+  assert.equal(store.diagnostic().async, 'ready');
+  assert.equal(store.diagnostic().selfTest, 'passed');
+});
+
 test('Mac rejects legacy envelopes without initializing their backend and accepts async records', async () => {
   for (const initializeFirst of [false, true]) {
     const store = createSecureStore({ safeStorage: forbidLegacy(api()), platform: 'darwin' });

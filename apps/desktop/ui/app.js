@@ -16,13 +16,15 @@ function render(state) {
   $('#folder-panel').hidden = !$('#cap-files').checked;
   $('#folders').replaceChildren(...state.roots.map(folder => { const li = document.createElement('li'); li.textContent = folder; return li; }));
   $('#message').textContent = state.message;
+  $('#retry-storage').disabled = state.busy || state.enabled || Boolean(state.job);
+  $('#retry-storage').textContent = state.checkingStorage ? '암호 저장소 확인 중…' : '암호 저장소 다시 확인';
   $('#setup').hidden = !state.settingsVisible;
   $('#show-settings').hidden = state.settingsVisible;
   $('#show-app').hidden = !state.settingsVisible || !state.origin;
   $('#pause').hidden = !state.enabled;
   $('#toolbar-pause').hidden = !state.enabled;
   $('#revoke').hidden = !state.paired;
-  $('#connect').textContent = state.busy ? '연결 확인 중…' : state.enabled ? '이 컴퓨터 연결됨' : '연결 허용';
+  $('#connect').textContent = state.busy && !state.checkingStorage ? '연결 확인 중…' : state.enabled ? '이 컴퓨터 연결됨' : '연결 허용';
   $('#connect').disabled = state.busy || state.enabled;
   $('#login').disabled = state.enabled || state.busy;
   $('#choose-folders').disabled = state.enabled || state.busy;
@@ -40,6 +42,7 @@ async function invoke(method, ...args) {
 for (const selector of fields) $(selector).addEventListener('input', () => { dirty = true; $('#folder-panel').hidden = !$('#cap-files').checked; });
 $('#login').addEventListener('click', () => { const value = form(); dirty = false; void invoke('configure', value); });
 $('#connect').addEventListener('click', () => { const value = form(); dirty = false; void invoke('connect', value); });
+$('#retry-storage').addEventListener('click', () => void invoke('retryStorage'));
 $('#choose-folders').addEventListener('click', () => void invoke('chooseFolders'));
 $('#pause').addEventListener('click', () => void invoke('pause'));
 $('#toolbar-pause').addEventListener('click', () => void invoke('pause'));
