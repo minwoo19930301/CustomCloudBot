@@ -22,12 +22,12 @@ function render(state) {
   $('#pause').hidden = !state.enabled;
   $('#toolbar-pause').hidden = !state.enabled;
   $('#revoke').hidden = !state.paired;
-  $('#connect').textContent = state.busy ? '연결 확인 중…' : state.enabled ? '이 컴퓨터 연결됨' : '연결 허용 ↗';
+  $('#connect').textContent = state.busy ? '연결 확인 중…' : state.enabled ? '이 컴퓨터 연결됨' : '연결 허용';
   $('#connect').disabled = state.busy || state.enabled;
   $('#login').disabled = state.enabled || state.busy;
   $('#choose-folders').disabled = state.enabled || state.busy;
   for (const selector of fields) $(selector).disabled = state.enabled || state.busy;
-  $('#connection-label').textContent = `${state.job ? '작업 중' : state.enabled ? '연결됨' : state.paired ? '일시정지' : '연결 준비'}${state.ownerLabel ? ' · ' + state.ownerLabel : ''}`;
+  $('#connection-label').textContent = `${state.job ? '작업 중' : state.enabled ? '연결됨' : state.paired ? '일시정지' : '연결 꺼짐'}${state.ownerLabel ? ' · ' + state.ownerLabel : ''}`;
   $('#status-dot').className = `status-dot${state.job ? ' working' : state.enabled ? ' connected' : ''}`;
   $('#external-link').hidden = !state.externalHost;
   $('#external-link').textContent = state.externalHost ? `${state.externalHost} 열기 ↗` : '외부 링크 열기';

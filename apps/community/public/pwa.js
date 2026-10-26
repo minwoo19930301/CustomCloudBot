@@ -41,6 +41,10 @@ export function createPwaController({ api, getSession, toast = () => {} }) {
     showDialog(help.title, `${help.message}\n\n앱은 현재 열어 둔 주소(${window.location.origin})로 설치됩니다.`);
   };
   const renderInstall = () => {
+    if (typeof window.customCloudBotDesktop?.openSettings === "function") {
+      installButtons.forEach(button => { button.hidden = true; button.classList.add("is-hidden"); });
+      return;
+    }
     const standalone = isStandalone();
     installButtons.forEach((button) => {
       button.classList.remove("is-hidden");

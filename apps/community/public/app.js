@@ -171,6 +171,11 @@ function messageProfile(message) {
   return message.authorId===state.session?.user?.id ? state.session.user : message;
 }
 function renderAccountTools() {
+  if (typeof window.customCloudBotDesktop?.openSettings === "function" && !$("#desktop-settings-button")) {
+    const button=document.createElement("button");button.id="desktop-settings-button";button.type="button";button.className="profile-menu-item";button.textContent="내 컴퓨터 연결 · 데스크톱 설정";
+    button.onclick=()=>{closeProfileMenu();void window.customCloudBotDesktop.openSettings().catch(()=>toast("데스크톱 설정을 열지 못했습니다."));};
+    $("#notification-settings-button").after(button);
+  }
   if (!$("#delete-all-conversations")) {
     const button=document.createElement("button");button.id="delete-all-conversations";button.type="button";button.className="profile-menu-item";button.textContent="내 대화 전체 삭제";
     button.onclick=()=>{closeProfileMenu();void openDeleteAllConversations();};

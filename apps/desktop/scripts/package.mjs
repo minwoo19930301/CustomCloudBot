@@ -19,7 +19,7 @@ const destination = path.join(source, 'dist');
 try {
   await fs.mkdir(staging);
   // Explicit inclusion keeps developer files, private config and workspace dependencies out of the application.
-  for (const item of ['main.mjs', 'preload.cjs', 'security.mjs', 'executor.mjs', 'ui']) {
+  for (const item of ['main.mjs', 'preload.cjs', 'cloud-preload.cjs', 'security.mjs', 'secure-store.mjs', 'executor.mjs', 'ui']) {
     await fs.cp(path.join(source, item), path.join(staging, item), { recursive: true });
   }
   await fs.writeFile(path.join(staging, 'package.json'), JSON.stringify({ name: metadata.name, version: metadata.version, productName: 'CustomCloudBot Desktop', type: 'module', main: 'main.mjs', license: metadata.license }));

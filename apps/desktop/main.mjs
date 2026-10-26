@@ -5,13 +5,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createExecutor } from './executor.mjs';
+import { createSecureStore } from './secure-store.mjs';
 import { normalizeAppUrl, isTrustedSender, isSameOriginUrl, externalHttpsUrl, capabilityList, consentDetails, safeError, validJob, isStaleResultError } from './security.mjs';
 
 app.setName('CustomCloudBot Desktop');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const localPage = path.join(here, 'ui/index.html');
-const TOOLBAR_HEIGHT = 58;
 let window;
 let cloud;
 let settingsVisible = true;
@@ -32,6 +32,11 @@ let storeQueue = Promise.resolve();
 let config = { origin: '', name: os.hostname(), roots: [], capabilities: { files: false, terminal: false, browser: false } };
 let credentials = { token: null, device: null, seenJobs: [], outbox: [], pairedCapabilities: [] };
 let storageAvailable = false;
+let diagnosticQueue = Promise.resolve();
+const secureStore = createSecureStore({ safeStorage, onDiagnostic: diagnostic => {
+  const directory = app.getPath('userData');
+  diagnosticQueue = diagnosticQueue.catch(() => {}).then(() => fs.mkdir(directory, { recursive: true, mode: 0o700 })).then(() => fs.writeFile(path.join(directory, 'storage-diagnostic.json'), JSON.stringify(diagnostic), { mode: 0o600 })).catch(() => {});
+} });
 const policy = () => ({ enabled, roots: [...config.roots], capabilities: { ...config.capabilities } });
 const executor = createExecutor({ getPolicy: policy, protectedPaths: [app.getPath('userData'), app.getAppPath(), ...(app.isPackaged ? [process.resourcesPath, path.resolve(process.resourcesPath, '../..')] : [])], openExternal: url => shell.openExternal(url), describeMachine: () => ({ name: config.name, platform: process.platform, arch: process.arch }) });
 
@@ -45,16 +50,7 @@ function paths() {
   return { directory, config: path.join(directory, 'desktop-settings.json'), credential: path.join(directory, 'desktop-connection.enc') };
 }
 
-async function encryptionAvailable() {
-  if (process.platform === 'linux' && ['basic_text', 'unknown'].includes(safeStorage.getSelectedStorageBackend())) return false;
-  return withDeadline(safeStorage.isAsyncEncryptionAvailable(), 5000, false);
-}
-
-async function withDeadline(promise, milliseconds, fallback) {
-  let timer;
-  try { return await Promise.race([promise, new Promise(resolve => { timer = setTimeout(() => resolve(fallback), milliseconds); })]); }
-  finally { clearTimeout(timer); }
-}
+async function encryptionAvailable() { return secureStore.available(); }
 
 async function atomicWrite(file, data) {
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -69,7 +65,7 @@ function persist({ secret = true } = {}) {
     await atomicWrite(files.config, JSON.stringify(config));
     if (secret) {
       if (!await encryptionAvailable()) throw new Error('secure_storage_unavailable');
-      await atomicWrite(files.credential, await safeStorage.encryptStringAsync(JSON.stringify(credentials)));
+      await atomicWrite(files.credential, await secureStore.encrypt(JSON.stringify(credentials)));
     }
   });
   return storeQueue;
@@ -79,12 +75,16 @@ async function loadState() {
   try {
     const saved = JSON.parse(await fs.readFile(paths().config, 'utf8'));
     config = validateSettings(saved, saved.roots);
+    if (config.origin) {
+      settingsVisible = false;
+      void ensureCloud().catch(() => { showSettings(true); setMessage('서비스를 열지 못했습니다. 연결 설정에서 주소를 확인해 주세요.'); });
+    }
     notify();
   } catch {}
-  storageAvailable = await encryptionAvailable().catch(() => false);
-  if (!storageAvailable) { statusMessage = '운영체제의 암호 저장소를 사용할 수 없어 컴퓨터 연결이 잠겨 있습니다.'; return; }
+  storageAvailable = await secureStore.selfTest().catch(() => false);
+  if (!storageAvailable) { statusMessage = secureStore.diagnostic().async === 'timeout' ? '암호 저장소 응답이 지연되고 있습니다. 연결 설정에서 다시 시도해 주세요.' : '운영체제 암호 저장소를 확인하지 못했습니다. 연결 설정에서 다시 시도해 주세요.'; return; }
   try {
-    const decrypted = await withDeadline(safeStorage.decryptStringAsync(await fs.readFile(paths().credential)), 5000, null);
+    const decrypted = await secureStore.decrypt(await fs.readFile(paths().credential));
     if (!decrypted) throw new Error('secure_storage_unavailable');
     const saved = JSON.parse(decrypted.result);
     if (saved.pairedOrigin !== config.origin) throw new Error('stored_origin_mismatch');
@@ -125,7 +125,7 @@ function setMessage(message) { statusMessage = message; notify(); }
 function layoutCloud() {
   if (!cloud || !window) return;
   const [width, height] = window.getContentSize();
-  cloud.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: Math.max(0, height - TOOLBAR_HEIGHT) });
+  cloud.setBounds({ x: 0, y: 0, width, height: Math.max(0, height) });
   cloud.setVisible(!settingsVisible);
 }
 function showSettings(show) { settingsVisible = show; layoutCloud(); notify(); }
@@ -138,7 +138,7 @@ function pendingLink(value) {
 async function ensureCloud() {
   if (!cloud) {
     cloud = new WebContentsView({ webPreferences: {
-      partition: 'persist:customcloudbot-cloud', sandbox: true, contextIsolation: true,
+      preload: path.join(here, 'cloud-preload.cjs'), partition: 'persist:customcloudbot-cloud', sandbox: true, contextIsolation: true,
       nodeIntegration: false, webSecurity: true, allowRunningInsecureContent: false,
       webviewTag: false, navigateOnDragDrop: false
     } });
@@ -390,6 +390,11 @@ function handle(channel, callback) {
 }
 
 function installIPC() {
+  ipcMain.handle('desktop:open-settings', event => {
+    if (!cloud || event.sender !== cloud.webContents || event.senderFrame !== cloud.webContents.mainFrame
+        || !isSameOriginUrl(event.senderFrame?.url, config.origin)) throw new Error('untrusted_sender');
+    showSettings(true);
+  });
   handle('desktop:status', () => state());
   handle('desktop:configure', async value => {
     if (enabled || currentJob) throw new Error('pause_before_configuring');
@@ -434,10 +439,10 @@ function installIPC() {
 // entry module before emitting ready. Show the UI before asking the OS key store.
 if (primaryInstance) void app.whenReady().then(async () => {
 window = new BrowserWindow({ width: 1240, height: 860, minWidth: 760, minHeight: 620, title: 'CustomCloudBot Desktop', backgroundColor: '#f4f3fa',
-  titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', trafficLightPosition: { x: 18, y: 21 },
+  titleBarStyle: 'default',
   webPreferences: { preload: path.join(here, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, webviewTag: false, navigateOnDragDrop: false }
 });
-Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'CustomCloudBot Desktop', submenu: [{ role: 'about' }, { type: 'separator' }, { label: '연결 일시정지', click: () => { void pauseConnection(); } }, { role: 'quit' }] }, { role: 'editMenu' }, { role: 'windowMenu' }]));
+Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'CustomCloudBot Desktop', submenu: [{ role: 'about' }, { label: '컴퓨터 연결 설정…', accelerator: 'CmdOrCtrl+,', click: () => showSettings(true) }, { type: 'separator' }, { label: '연결 일시정지', click: () => { void pauseConnection(); } }, { role: 'quit' }] }, { role: 'editMenu' }, { role: 'windowMenu' }]));
 window.webContents.on('will-navigate', event => event.preventDefault());
 window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 window.webContents.on('will-attach-webview', event => event.preventDefault());
